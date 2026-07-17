@@ -43,3 +43,18 @@ async def alerts(minutes: int = Query(60, ge=1, le=1440)) -> dict:
 async def status(deep: bool = False, alert_minutes: int = Query(60, ge=1, le=1440)) -> dict:
     """实盘运行健康总览。"""
     return _payload(await quantx_proxy.get_status(deep=deep, alert_minutes=alert_minutes))
+
+
+@router.get("/market-review")
+async def market_review() -> dict:
+    """QuantX 最近一次大盘复盘报告 (只读加载已保存结果, 不触发新的 LLM 生成)。"""
+    return _payload(await quantx_proxy.get_market_review_latest())
+
+
+@router.get("/runs")
+async def runs(
+    strategy: str = Query("", description="可选: 按策略名过滤"),
+    limit: int = Query(50, ge=1, le=500),
+) -> dict:
+    """QuantX 策略回测运行历史 (只读)。"""
+    return _payload(await quantx_proxy.get_runs(strategy=strategy or None, limit=limit))

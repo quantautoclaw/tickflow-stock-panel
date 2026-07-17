@@ -82,3 +82,41 @@ def test_status_deep_flag_forwarded(monkeypatch):
     assert resp.status_code == 200
     assert captured["deep"] is True
     assert resp.json()["mode"] == "deep"
+
+
+def test_market_review_available_payload(monkeypatch):
+    async def _fake():
+        return quantx_proxy.QuantxApiResult(available=True, data={"date": "2026-07-16", "report": "复盘内容"})
+    monkeypatch.setattr(quantx_proxy, "get_market_review_latest", _fake)
+
+    resp = _client().get("/api/quantx/market-review")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["report"] == "复盘内容"
+
+
+def test_runs_forwards_strategy_filter(monkeypatch):
+    captured = {}
+
+    async def _fake(strategy, limit):
+        captured["strategy"] = strategy
+        captured["limit"] = limit
+        return quantx_proxy.QuantxApiResult(available=True, data={"runs": [], "total": 0})
+    monkeypatch.setattr(quantx_proxy, "get_runs", _fake)
+
+    resp = _client().get("/api/quantx/runs", params={"strategy": "trend_breakout", "limit": 10})
+    assert resp.status_code == 200
+    assert captured == {"strategy": "trend_breakout", "limit": 10}
+
+
+def test_runs_strategy_defaults_to_none(monkeypatch):
+    captured = {}
+
+    async def _fake(strategy, limit):
+        captured["strategy"] = strategy
+        return quantx_proxy.QuantxApiResult(available=True, data={"runs": [], "total": 0})
+    monkeypatch.setattr(quantx_proxy, "get_runs", _fake)
+
+    _client().get("/api/quantx/runs")
+    assert captured["strategy"] is None

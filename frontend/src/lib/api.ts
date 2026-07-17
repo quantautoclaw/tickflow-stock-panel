@@ -2154,6 +2154,17 @@ export const api = {
   quantxStatus: (deep?: boolean) =>
     request<QuantxStatusResp>(`/api/quantx/status${deep ? '?deep=true' : ''}`),
 
+  quantxMarketReview: () =>
+    request<{ available: boolean; error?: string; date?: string; report?: string; generated_at?: string }>('/api/quantx/market-review'),
+
+  quantxRuns: (params?: { strategy?: string; limit?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.strategy) qs.set('strategy', params.strategy)
+    if (params?.limit) qs.set('limit', String(params.limit))
+    const s = qs.toString()
+    return request<{ available: boolean; error?: string; runs?: Record<string, unknown>[]; total?: number }>(`/api/quantx/runs${s ? `?${s}` : ''}`)
+  },
+
   alertDelete: (ts: number) =>
     request<{ ok: boolean }>(`/api/alerts/${ts}`, { method: 'DELETE' }),
 

@@ -136,3 +136,45 @@ async def test_get_status_connect_error_returns_unavailable(monkeypatch):
     result = await quantx_proxy.get_status()
     assert result.available is False
     assert "无法连接" in result.error
+
+
+async def test_get_market_review_latest_only_hits_latest_endpoint(monkeypatch):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        return httpx.Response(200, json={"date": "2026-07-16", "report": "今日大盘...", "generated_at": "2026-07-16T15:05:00"})
+
+    _patch_client(monkeypatch, handler)
+    result = await quantx_proxy.get_market_review_latest()
+    assert result.available is True
+    # 必须只打 /latest, 不能打会触发 LLM 生成的 /api/insight/market-review
+    assert captured["path"] == "/api/insight/market-review/latest"
+    assert result.data["report"] == "今日大盘..."
+
+
+async def test_get_runs_passes_strategy_and_limit(monkeypatch):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"runs": [], "total": 0})
+
+    _patch_client(monkeypatch, handler)
+    result = await quantx_proxy.get_runs(strategy="trend_breakout", limit=20)
+    assert result.available is True
+    assert captured["path"] == "/api/runs"
+    assert captured["params"] == {"limit": "20", "strategy": "trend_breakout"}
+
+
+async def test_get_runs_omits_strategy_param_when_none(monkeypatch):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"runs": [], "total": 0})
+
+    _patch_client(monkeypatch, handler)
+    await quantx_proxy.get_runs()
+    assert "strategy" not in captured["params"]

@@ -92,3 +92,20 @@ async def get_alerts(minutes: int = 60) -> QuantxApiResult:
 async def get_status(deep: bool = False, alert_minutes: int = 60) -> QuantxApiResult:
     """实盘运行健康总览: 进程/网关/后台循环/告警统计/止损单/账本。shallow 默认零成本。"""
     return await _get("/api/monitoring/runtime-status", params={"deep": deep, "alert_minutes": alert_minutes})
+
+
+async def get_market_review_latest() -> QuantxApiResult:
+    """QuantX 最近一次大盘复盘报告 (LLM 生成, 只读加载已保存结果, 不触发新的 LLM 调用)。
+
+    刻意不代理 GET /api/insight/market-review (无 date 缓存命中时会同步触发一次
+    LLM 生成, 有明显延迟与 token 成本) —— 只读展示只应加载已产出的报告。
+    """
+    return await _get("/api/insight/market-review/latest")
+
+
+async def get_runs(strategy: str | None = None, limit: int = 50) -> QuantxApiResult:
+    """QuantX 策略回测运行历史 (只读, ResultStore)。"""
+    params: dict[str, Any] = {"limit": limit}
+    if strategy:
+        params["strategy"] = strategy
+    return await _get("/api/runs", params=params)

@@ -86,6 +86,7 @@ export const QK = {
   quantxStatus:         ['quantx-status'] as const,
   quantxPositions:      ['quantx-positions'] as const,
   quantxDecisions:      ['quantx-decisions'] as const,
+  quantxMarketReview:   ['quantx-market-review'] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====

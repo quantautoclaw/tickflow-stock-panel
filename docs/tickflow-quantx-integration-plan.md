@@ -23,6 +23,7 @@
 - 不绕过 QuantX 的 strategy registry 晋级门禁自动下单。
 - 不在 TickFlow 进程内 import rqalpha / vnpy 等重依赖。
 - 不废弃 TickFlow 自有回测引擎（定位不同，双引擎并存）。
+- **TickFlow 不执行交易、不直连经纪商/QMT/vnpy Gateway、不新增交易页面**——下单与执行 100% 留在 QuantX 侧，TickFlow 只做只读展示与信号转发（详见第 7 节）。
 
 ---
 
@@ -36,7 +37,7 @@
 | 数据层 | Polars + Parquet，TickFlow 主源 + 插件化增强（QuantX 插件已接入） | 架构清晰，插件机制可复用 |
 | 回测 | `backend/app/backtest/engine.py`（约 1600 行）：向量化日频，撮合支持 close_t / open_t+1，成本模型（佣金+印花税+滑点），移动止盈损，因子回测 + 策略回测两套前端页面 | 适合**交互式快速迭代**，秒级出图；非事件驱动，语义近似 |
 | 策略 | 内置策略 + AI 生成器（`strategy/ai_generator.py`）+ 监控规则引擎 | 有特色（AI 生成），缺生命周期管理 |
-| 实盘 | `frontend/src/pages/Trading.tsx` 为**占位页**，注释中规划了 QMT/掘金/Ptrade/vnpy 桥接 | **最大空白** |
+| 实盘 | 无（原占位页 `Trading.tsx` 已被 upstream 因合规原因删除，不复活；TickFlow 不执行交易，只读展示 QuantX 持仓/决策） | 按设计留白，非缺陷 |
 | 复盘 | Review 页 + market_recap | 有 UI 骨架，缺决策级数据 |
 
 ### 2.2 QuantX
@@ -91,15 +92,15 @@
 |----------|------|------|
 | QuantX 数据（DataStore） | 进程内 import `quantx_data`（已实现，`plugins/quantx/bridge.py`） | 纯读 parquet，依赖轻（polars），无环境冲突 |
 | QuantX 回测引擎 | **subprocess** 调 `quantx backtest <id>` | rqalpha 依赖重；vnpy 需 Python 3.11 与 TickFlow 环境隔离 |
-| QuantX 实盘/监控/研究 | **HTTP** 代理 QuantX `apps/api` | 接口现成；故障隔离，QuantX 挂掉不拖垮 TickFlow |
-| TickFlow 信号 → QuantX | **Webhook**（alert_handler 新增通道） | 与 Trading.tsx 注释中的既有规划一致 |
+| QuantX 持仓/决策/研究（只读） | **HTTP** 代理 QuantX `apps/api` | 接口现成；故障隔离，QuantX 挂掉不拖垮 TickFlow；TickFlow 不执行交易 |
+| TickFlow 信号 → QuantX 决策日志 | **Webhook**（alert_handler 新增通道） | 转发信号供打分，非下单指令 |
 
 ### 4.2 架构图
 
 ```text
 ┌─────────────────────────────────────────────────────────┐
 │                TickFlow 前端 (React)                     │
-│  选股/分析/监控 │ 回测(快速/严谨) │ 交易驾驶舱 │ 研究/复盘 │
+│  选股/分析 │ 监控中心(+只读持仓/决策) │ 回测(快速/严谨) │ 复盘/策略 │
 └──────────────────────────┬──────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────┐
@@ -107,7 +108,7 @@
 │                                                          │
 │  L1 数据增强        L2 回测适配        L3/L4 代理层       │
 │  (已实现 ✅)        BacktestEngine     QuantXProxy       │
-│  plugins/quantx     Adapter            service           │
+│  plugins/quantx     Adapter            service(只读+转发) │
 └──────┬──────────────────┬──────────────────┬─────────────┘
        │ in-process       │ subprocess       │ HTTP
        │ import           │                  │
@@ -116,7 +117,7 @@
 │ DataStore      │ │ backtest <id>  │ │ trading/monitoring │
 │ (parquet 只读) │ │ (rqalpha/fast) │ │ position/risk/...  │
 └────────────────┘ └────────────────┘ └──────┬─────────────┘
-                                             │
+                                             │ (交易执行 100% 留在 QuantX 侧)
                                       ┌──────▼─────────────┐
                                       │ LiveTradingRunner  │
                                       │ TradeExecutor(QMT) │
@@ -204,29 +205,30 @@ QuantX `apps/api` 已有 `ic_analysis`、`walk_forward`、`timing_backtest` 路�
 
 ---
 
-## 7. L3 实盘交易层：双向桥（填补 Trading 占位页）
+## 7. L3 决策展示层：只读代理 + 信号转发（不涉及交易执行）
 
-这是**收益最大**的一块：TickFlow 缺的正是 QuantX 已生产化的能力，且 `Trading.tsx` 注释中的规划（信号多通道分发、QMT 桥接）与本方案完全吻合。
+**边界声明**：TickFlow 自始至终不执行交易、不直连券商/QMT/vnpy Gateway，不新增独立的「交易」页面。下单、撮合、风控拦截 100% 留在 QuantX 侧的 `TradeExecutor` / `StopOrderManager` / `LiveTradingRunner`。TickFlow 只做两件事：**读**QuantX 的持仓与决策建议、**转发**监控信号给 QuantX 的决策日志做打分。两者都不触碰经纪商接口，因此与 upstream「research-only boundaries」的合规方向不冲突。
 
-### 7.1 状态入口（QuantX → TickFlow 前端，纯读，先做）
+> 背景：upstream 在 `697ff2a fix(compliance): reinforce research-only boundaries (#108)` 中删除了旧的 `Trading.tsx` 占位页（原注释规划的是 TickFlow 自己桥接 QMT/掘金/vnpy 直接下单）。本方案不复活该页面、不采用其信号直连下单的设计——下面的只读展示/信号转发功能改为并入监控中心、复盘等**现有**页面。
 
-新增 `backend/app/services/quantx_proxy.py` + `backend/app/api/trading.py`，HTTP 代理 QuantX `apps/api`：
+### 7.1 只读代理（QuantX → TickFlow 前端，先做）
 
-| TickFlow 端点（新增） | 代理目标（QuantX 现成） | 前端展示 |
+新增 `backend/app/services/quantx_proxy.py` + `backend/app/api/quantx.py`，HTTP 代理 QuantX `apps/api`；前端并入**现有**监控中心 / 复盘页，不新增独立页面：
+
+| TickFlow 端点（新增） | 代理目标（QuantX 现成） | 前端展示位置 |
 |----------------------|------------------------|----------|
-| `GET /api/trading/positions` | broker positions 路由 | 持仓列表（成本/现价/盈亏） |
-| `GET /api/trading/orders` | trading 路由 | 当日委托/成交 |
-| `GET /api/trading/decisions` | `GET /api/monitoring/position-decisions?minutes=240` | **盘中持仓决策建议**（HOLD/REDUCE/EXIT/TAKE_PROFIT/ADD + LLM 中文解读）|
-| `GET /api/trading/risk` | risk 路由 | 风控告警 |
-| `GET /api/trading/status` | system 路由 | QuantX 服务健康度（不可用时前端明确降级提示） |
+| `GET /api/quantx/positions` | broker positions 路由 | 监控中心新增只读卡片（持仓/成本/现价/盈亏） |
+| `GET /api/quantx/decisions` | `GET /api/monitoring/position-decisions?minutes=240` | **盘中持仓决策建议**（HOLD/REDUCE/EXIT/TAKE_PROFIT/ADD + LLM 中文解读），并入监控中心信号流 |
+| `GET /api/quantx/risk` | risk 路由 | 监控中心风控告警 |
+| `GET /api/quantx/status` | system 路由 | QuantX 服务健康度（不可用时前端明确降级提示，仅影响该卡片） |
 
 实施要点：
 
-- 配置项：`QUANTX_API_BASE_URL`（默认 `http://127.0.0.1:8000` 之类，具体端口以 QuantX gateway 配置为准）、超时（2~5s）、认证凭据走 TickFlow 现有 secrets_store。
-- **故障隔离**：QuantX api 不可达时返回明确的 `unavailable` 状态而非 500，前端 Trading 页显示"引擎离线"卡片；禁止阻塞其他页面。
-- Trading 页 UI：持仓表 + 决策建议流（决策建议是差异化亮点，QuantX 的 LLM 解读直接展示即可）。
+- 配置项：`QUANTX_API_BASE_URL`（具体端口以 QuantX gateway 配置为准）、超时（2~5s）、认证凭据走 TickFlow 现有 secrets_store。
+- **故障隔离**：QuantX api 不可达时返回明确的 `unavailable` 状态而非 500，对应卡片显示"引擎离线"，不阻塞监控中心其余功能。
+- 这些数据是**只读展示**，前端不提供任何下单/撤单操作入口。
 
-### 7.2 信号出口（TickFlow → QuantX，涉及交易链路，后做）
+### 7.2 信号转发（TickFlow → QuantX 决策日志，用于打分，非下单）
 
 TickFlow 监控产生的 `StrategyAlert` 通过 alert_handler 新增 **webhook 通道** POST 到 QuantX：
 
@@ -273,11 +275,11 @@ QuantX 的 vnpy 栈（打板/tick 级）是独立回路，**本方案不桥接**
 |------|------|------|------|-----------|
 | **P0** ✅ | 数据增强插件（已完成） | — | — | 已完成 |
 | **P1** | ext_data 接入 moneyflow / limit_list / top_list / hsgt | P0 的 bridge | 低（纯读） | 小：预设 + 单位换算 + 前端 JOIN 展示 |
-| **P2** | Trading 页状态入口（代理持仓/委托/决策建议/风控） | QuantX api 可达 | 低（纯读，故障隔离） | 中：proxy service + api 路由 + Trading 页 UI |
+| **P2** | 只读代理（持仓/决策建议/风控），并入监控中心/复盘页 | QuantX api 可达 | 低（纯读，故障隔离） | 中：proxy service + api 路由 + 现有页面接入卡片 |
 | **P3** | 回测适配器（rigorous 引擎 + 结果归一化） | 策略翻译器 | 中（口径差异、subprocess 管理） | 大：翻译器 + 适配器 + 前端引擎选择 |
-| **P4** | 信号出口 webhook + registry 只读视图 + 研究数据代理 | P2 的 proxy | 中（交易链路，需谨慎） | 中 |
+| **P4** | 信号转发 webhook（供 QuantX 决策日志打分）+ registry 只读视图 + 研究数据代理 | P2 的 proxy | 低（转发不下单，但涉及外部调用需谨慎） | 中 |
 
-原则：**先读后写、先数据后交易**。P1/P2 都是纯读、立刻增值、零交易风险，优先落地。
+原则：**先读后写、先数据后决策展示**。P1/P2 都是纯读、立刻增值、不涉及交易执行，优先落地。TickFlow 全程不新增交易页面、不直连经纪商。
 
 ---
 
@@ -288,9 +290,9 @@ QuantX 的 vnpy 栈（打板/tick 级）是独立回路，**本方案不桥接**
 | Python 环境冲突 | QuantX 统一 3.13、vnpy 需 3.11；rqalpha 依赖重 | 进程边界隔离：数据层 import 仅限 quantx_data（轻）；回测 subprocess 用 QuantX 自己的解释器（`QUANTX_PYTHON_BIN`） |
 | QuantX 数据新鲜度 | QuantX 靠手动 `ingest_master.py --incremental`，无自动调度 | TickFlow 盘后 pipeline 增加新鲜度检查步骤：DataStore 最新日期落后 N 个交易日则前端提示"QuantX 数据陈旧，补缺已跳过" |
 | 单位/口径不一致 | moneyflow 万元、hsgt 亿元；两引擎撮合模型不同 | 单位在接入层统一换算并写测试；回测结果 UI 明示引擎口径差异 |
-| QuantX api 故障传导 | 代理层超时/宕机 | 短超时（2~5s）+ 明确 unavailable 状态 + 前端降级卡片；禁止影响非交易页面 |
-| 交易安全 | 信号自动执行的误触发 | 信号只进建议队列；自动执行必须过 registry 晋级门禁；下单确认留在 QuantX 侧既有流程 |
-| 上游同步 | 本项目是 fork/使用 shy3130 的开源项目，深度改动可能与上游更新冲突 | 集成代码收敛在 `plugins/quantx/`、`services/quantx_*`、独立 api 路由中，减少对主干文件的侵入；通用增强机制可考虑贡献回上游 |
+| QuantX api 故障传导 | 代理层超时/宕机 | 短超时（2~5s）+ 明确 unavailable 状态 + 前端降级卡片；禁止影响监控中心/复盘页其余功能 |
+| 交易安全 | 误把只读展示/信号转发当成交易通道 | TickFlow 前端不提供任何下单/撤单操作入口；转发的信号只进 QuantX 决策日志做打分，不触发自动执行；自动执行必须过 registry 晋级门禁，执行逻辑 100% 在 QuantX 侧 |
+| 上游同步 | 本项目是 fork/使用 shy3130 的开源项目，深度改动可能与上游更新冲突；upstream 已表态「research-only boundaries」（见 `697ff2a`，删除了原 Trading.tsx 占位页） | 集成代码收敛在 `plugins/quantx/`、`services/quantx_*`、独立 api 路由中，减少对主干文件的侵入；不复活/新增交易执行类页面，与 upstream 合规方向保持一致；通用增强机制可考虑贡献回上游 |
 | Symbol 格式 | 两边均为 `.SH/.SZ/.BJ` canonical | 低风险；边界处仍统一走 `quantx_data.symbol` 转换函数 |
 
 ---

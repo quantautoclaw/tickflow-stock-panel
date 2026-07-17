@@ -132,7 +132,12 @@ class Settings(BaseSettings):
     )
     quantx_api_timeout: float = Field(
         default=5.0, gt=0,
-        description="QuantX apps/api 代理请求超时秒数",
+        description="QuantX apps/api 只读代理请求超时秒数",
+    )
+    quantx_backtest_timeout: float = Field(
+        default=300.0, gt=0,
+        description="QuantX 严谨回测(POST /api/strategies/execute-config)请求超时秒数, "
+        "明显长于只读代理, 因为 rqalpha 事件驱动回测可能耗时数分钟",
     )
     # tiers.yaml 路径 — frozen: 资源目录内; 非 frozen: 项目根目录
     tiers_yaml: Path = _RESOURCE_ROOT / "tiers.yaml" if _IS_FROZEN else _PROJECT_ROOT / "tiers.yaml"

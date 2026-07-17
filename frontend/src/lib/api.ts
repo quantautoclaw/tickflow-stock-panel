@@ -1542,6 +1542,32 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  // 严谨引擎复核: 代理 QuantX rqalpha_native, 只翻译打分排名部分, 见后端
+  // quantx_strategy_translator 模块注释。translation_warnings 必须展示给用户。
+  strategyBacktestRigorous: (payload: {
+    strategy_id: string
+    start?: string | null
+    end?: string | null
+    initial_capital?: number
+    benchmark?: string
+  }) =>
+    request<{
+      ok: boolean
+      error?: string
+      translation_warnings: string[]
+      engine?: string
+      dialect?: string
+      benchmark?: string
+      equity_curve?: { date: string; value: number }[]
+      summary?: Record<string, unknown>
+      trades?: Record<string, unknown>[]
+      trade_count?: number
+      logs?: string[]
+    }>('/api/backtest/strategy/rigorous', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
   pipelineRun: () => request<{ job_id: string; reused: boolean }>(
     '/api/pipeline/run', { method: 'POST' },
   ),

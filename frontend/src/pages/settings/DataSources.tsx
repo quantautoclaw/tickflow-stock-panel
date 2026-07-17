@@ -106,6 +106,27 @@ export function SettingsDataSourcesPanel() {
     onError: (e: Error) => toast(`卸载失败: ${e.message}`, 'error'),
   })
 
+  // 数据增强开关 (data_enhancers) + 试拉
+  const enhancers = prefs.data?.data_enhancers ?? []
+  const realtimeChain = prefs.data?.realtime_provider_chain ?? []
+  const updateEnhancers = useMutation({
+    mutationFn: (names: string[]) => api.updateDataProviders({ data_enhancers: names }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.preferences })
+    },
+  })
+  const updateRealtimeChain = useMutation({
+    mutationFn: (names: string[]) => api.updateDataProviders({ realtime_provider_chain: names }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.preferences })
+    },
+  })
+  const testEnhancerMut = useMutation({
+    mutationFn: (name: string) => api.testDataSource(name, 'daily'),
+    onSuccess: (data) => toast(`试拉成功: ${data.rows} 行`, 'success'),
+    onError: (e: unknown) => toast(`试拉失败: ${(e as Error).message || e}`, 'error'),
+  })
+
   const builtin: DataSourceItem[] = sources.data?.builtin ?? []
   const pluginList: PluginDataSourceItem[] = sources.data?.plugins ?? []
   const customList: DataSourceItem[] = sources.data?.custom ?? []
@@ -117,9 +138,11 @@ export function SettingsDataSourcesPanel() {
   const pluginNames = new Set(pluginList.map(p => p.name))
 
   // 顶部数据源选择列表 (内置 + 所有插件 + 自定义 + 新增)
-  const pluginItems: DataSourceItem[] = pluginList.map(p => ({
-    name: p.name, display_name: p.display_name, datasets: p.datasets,
-  }))
+  const pluginItems: DataSourceItem[] = pluginList
+    .filter(p => p.role !== 'enhancer')
+    .map(p => ({
+      name: p.name, display_name: p.display_name, datasets: p.datasets,
+    }))
   const allItems = [
     ...builtin,
     ...pluginItems,
@@ -130,6 +153,14 @@ export function SettingsDataSourcesPanel() {
 
   return (
     <div className="space-y-5 max-w-5xl">
+      {/* ===== 当前数据路由 (§15.3) ===== */}
+      <DataRoutingSummary
+        dailyMain={activeName === 'tickflow' ? 'TickFlow' : (customList.find(s => s.name === activeName)?.display_name || activeName)}
+        enhancers={enhancers}
+        realtimeChain={realtimeChain}
+        plugins={pluginList}
+      />
+
       {/* ===== 顶部: 当前数据源 + 数据源选择 (一个大卡片) ===== */}
       <section className="rounded-card border border-border bg-surface p-5">
         <div className="flex items-center justify-between mb-4">
@@ -312,6 +343,27 @@ export function SettingsDataSourcesPanel() {
         </div>
       </section>
 
+      {/* ===== 数据增强 (enhancers) ===== */}
+      <DataEnhancementSection
+        plugins={pluginList}
+        enhancers={enhancers}
+        realtimeChain={realtimeChain}
+        testing={testEnhancerMut.isPending}
+        updating={updateEnhancers.isPending || updateRealtimeChain.isPending}
+        onToggle={(name, enable) => {
+          const next = new Set(enhancers)
+          if (enable) next.add(name); else next.delete(name)
+          updateEnhancers.mutate([...next])
+        }}
+        onRealtimeToggle={(name, enable) => {
+          const next = realtimeChain.filter(n => n !== name)
+          if (enable) next.unshift(name)
+          if (enable && !next.includes('tickflow')) next.push('tickflow')
+          updateRealtimeChain.mutate(next)
+        }}
+        onTest={(name) => testEnhancerMut.mutate(name)}
+      />
+
       {/* ===== 下方: 编辑区 ===== */}
       <AnimatePresence mode="wait">
         <motion.div
@@ -476,6 +528,194 @@ function TickFlowDetail({ active, onSwitch, switching }: { active: boolean; onSw
           切换为当前数据源
         </button>
       )}
+    </section>
+  )
+}
+
+// ================================================================
+// 数据增强区 (§15.2): 展示 enhancer 插件, 启用/停用/试拉/配置说明
+// ================================================================
+
+const ENHANCER_DATASET_LABEL: Record<string, string> = {
+  daily: '日K补缺',
+  realtime: '实时',
+  instruments: '维表',
+}
+const ASSET_TYPE_LABEL: Record<string, string> = {
+  stock: '股票',
+  etf: 'ETF',
+  index: '指数',
+}
+
+function DataEnhancementSection({
+  plugins,
+  enhancers,
+  realtimeChain,
+  testing,
+  updating,
+  onToggle,
+  onRealtimeToggle,
+  onTest,
+}: {
+  plugins: PluginDataSourceItem[]
+  enhancers: string[]
+  realtimeChain: string[]
+  testing: boolean
+  updating: boolean
+  onToggle: (name: string, enable: boolean) => void
+  onRealtimeToggle: (name: string, enable: boolean) => void
+  onTest: (name: string) => void
+}) {
+  // 只展示 role=enhancer/both 的插件
+  const enhancerPlugins = plugins.filter(
+    p => (p.role === 'enhancer' || p.role === 'both'),
+  )
+  if (enhancerPlugins.length === 0) return null
+
+  return (
+    <section className="rounded-card border border-border bg-surface p-5">
+      <div className="flex items-center gap-2.5 mb-1">
+        <Database className="h-4 w-4 text-secondary" />
+        <h2 className="text-sm font-medium text-foreground">数据增强</h2>
+      </div>
+      <p className="text-[11px] text-muted/60 mb-4">
+        增强源仅按 (symbol, 日期) 补缺, 不覆盖 TickFlow 已有数据; 实时行情按链路优先获取。
+      </p>
+      <div className="space-y-3">
+        {enhancerPlugins.map(plugin => {
+          const enabled = enhancers.includes(plugin.name)
+          const realtimeEnabled = realtimeChain.includes(plugin.name)
+          const unavailable = !plugin.available
+          const showConfigHint = unavailable && plugin.runtime === 'none'
+          return (
+            <div
+              key={plugin.name}
+              className="rounded-lg border border-border/60 bg-elevated/20 p-4"
+            >
+              <div className="flex items-start justify-between gap-3 mb-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <span className="text-sm font-medium text-foreground">{plugin.display_name}</span>
+                    <span className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                      unavailable ? 'bg-muted/10 text-muted/50' : 'bg-accent/10 text-accent'
+                    }`}>
+                      {unavailable ? '未配置' : '可用'}
+                    </span>
+                  </div>
+                  {plugin.description && (
+                    <p className="text-[11px] text-muted/60 leading-relaxed">{plugin.description}</p>
+                  )}
+                </div>
+                {unavailable ? (
+                  <span className="text-[10px] text-muted/50 font-mono break-all text-right max-w-[55%]" title={plugin.status}>
+                    {plugin.status}
+                  </span>
+                ) : (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      onClick={() => onTest(plugin.name)}
+                      disabled={testing}
+                      className="rounded px-2 py-1 text-[10px] font-medium bg-elevated/60 text-secondary hover:bg-elevated transition-colors disabled:opacity-50"
+                    >
+                      试拉
+                    </button>
+                    <button
+                      onClick={() => onRealtimeToggle(plugin.name, !realtimeEnabled)}
+                      disabled={updating}
+                      className="rounded px-2 py-1 text-[10px] font-medium bg-elevated/60 text-secondary hover:bg-elevated transition-colors disabled:opacity-50"
+                    >
+                      {realtimeEnabled ? '移出实时链' : '实时优先'}
+                    </button>
+                    {enabled ? (
+                      <button
+                        onClick={() => onToggle(plugin.name, false)}
+                        disabled={updating}
+                        className="rounded px-2 py-1 text-[10px] font-medium bg-accent/10 text-accent hover:bg-accent/20 transition-colors disabled:opacity-50"
+                      >
+                        停用补缺
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => onToggle(plugin.name, true)}
+                        disabled={updating}
+                        className="rounded px-2 py-1 text-[10px] font-medium bg-accent/10 text-accent hover:bg-accent/20 transition-colors disabled:opacity-50"
+                      >
+                        启用补缺
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+              {/* 能力 + 资产 + 状态 */}
+              <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                {plugin.datasets.map(ds => (
+                  <span key={ds} className="text-[9px] text-muted/70 bg-elevated/60 px-1.5 py-0.5 rounded">
+                    {ENHANCER_DATASET_LABEL[ds] || ds}
+                  </span>
+                ))}
+                {plugin.asset_types?.map(at => (
+                  <span key={at} className="text-[9px] text-muted/70 border border-border/40 px-1.5 py-0.5 rounded">
+                    {ASSET_TYPE_LABEL[at] || at}
+                  </span>
+                ))}
+                {enabled && (
+                  <span className="inline-flex items-center gap-0.5 text-[9px] text-accent">
+                    <Check className="h-2.5 w-2.5" /> 历史补缺已启用
+                  </span>
+                )}
+                {realtimeEnabled && (
+                  <span className="inline-flex items-center gap-0.5 text-[9px] text-accent">
+                    <Check className="h-2.5 w-2.5" /> 实时链已启用
+                  </span>
+                )}
+              </div>
+              {showConfigHint && plugin.install_hint && (
+                <div className="mt-2 flex items-start gap-1.5 text-[10px] text-muted/50">
+                  <FileWarning className="h-3 w-3 shrink-0 mt-0.5" />
+                  <code className="break-all">{plugin.install_hint}</code>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+// ================================================================
+// 当前数据路由 (§15.3): 一目了然各行数据来源
+// ================================================================
+
+function DataRoutingSummary({
+  dailyMain,
+  enhancers,
+  realtimeChain,
+  plugins,
+}: {
+  dailyMain: string
+  enhancers: string[]
+  realtimeChain: string[]
+  plugins: PluginDataSourceItem[]
+}) {
+  const nameOf = (n: string) => n === 'tickflow' ? 'TickFlow' : (plugins.find(p => p.name === n)?.display_name || n)
+  const enhText = enhancers.length > 0 ? enhancers.map(nameOf).join(' + ') : '—'
+  const chainText = realtimeChain.length > 0 ? realtimeChain.map(nameOf).join(' → ') : 'TickFlow'
+  const rows: { label: string; value: string }[] = [
+    { label: '日K主源', value: dailyMain },
+    { label: '日K增强', value: enhText },
+    { label: '实时链路', value: chainText },
+  ]
+  return (
+    <section className="rounded-card border border-border bg-surface px-5 py-3.5">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+        {rows.map(r => (
+          <div key={r.label} className="flex items-center gap-2">
+            <span className="text-[10px] uppercase tracking-widest text-muted">{r.label}</span>
+            <span className="text-xs font-medium text-foreground">{r.value}</span>
+          </div>
+        ))}
+      </div>
     </section>
   )
 }

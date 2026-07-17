@@ -110,6 +110,7 @@ def _symbol_to_code(symbol: str) -> str:
 
 
 def _dimension_label(value: object) -> str:
+    """清理上游维度标签中的 null/NaN 和空白。"""
     if value is None or (isinstance(value, float) and not math.isfinite(value)):
         return ""
     text = str(value).strip()
@@ -170,38 +171,33 @@ def _flatten_industry_rows(raw_rows: list[dict]) -> list[dict]:
 _ENVELOPE_KEYS = ("data", "list", "rows", "result", "results")
 
 
-async def _fetch_json(url: str) -> list[dict]:
-    """请求 JSON 接口, 返回行数组。超时 30s, 失败抛异常由调用方兜底。
+def _unwrap_rows(data: object) -> list[dict]:
+    """把直接数组或常见 JSON 信封统一解包成行数组。"""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in _ENVELOPE_KEYS:
+            inner = data.get(key)
+            if isinstance(inner, list):
+                return inner
+        for value in data.values():
+            if isinstance(value, list):
+                return value
+    raise ValueError(
+        f"接口返回不是数组 (type={type(data).__name__}), "
+        f"响应预览: {str(data)[:200]}"
+    )
 
-    兼容两种上游返回形态:
-      - 直接是数组: [{...}, ...]          → 原样返回
-      - 信封包裹: {data: [{...}]} 等       → 自动解包
-    """
+
+async def _fetch_json(url: str) -> list[dict]:
+    """请求 JSON 行数组，并兼容常见的 ``{data: [...]}`` 信封响应。"""
     import httpx
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url)
         resp.raise_for_status()
         data = resp.json()
-
-    if isinstance(data, list):
-        return data
-
-    # 信封解包: 在常见键里找第一个值为数组的
-    if isinstance(data, dict):
-        for key in _ENVELOPE_KEYS:
-            inner = data.get(key)
-            if isinstance(inner, list):
-                return inner
-        # 兜底: 遍历所有值, 取第一个数组
-        for v in data.values():
-            if isinstance(v, list):
-                return v
-
-    raise ValueError(
-        f"接口返回不是数组 (type={type(data).__name__}), "
-        f"响应预览: {str(data)[:200]}"
-    )
+    return _unwrap_rows(data)
 
 
 async def _seed_one(config: ExtConfig, flatten, data_dir: Path) -> int:

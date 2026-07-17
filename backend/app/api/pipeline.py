@@ -6,13 +6,23 @@ import concurrent.futures as _cf
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
 
+from app.api.data import invalidate_storage_cache
 from app.jobs import daily_pipeline
 from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
-from app.api.data import invalidate_storage_cache
 
 # 长时间任务专用线程池（隔离于 FastAPI 默认线程池，防止阻塞请求处理）
 _long_task_executor = _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="long-task")
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> None:
+    """保留 task 强引用直到结束, 避免后台任务被提前回收。"""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 
 logger = logging.getLogger(__name__)
 
@@ -64,14 +74,14 @@ async def run_now(request: Request) -> dict:
             job_store.succeed(job_id, result)
             invalidate_storage_cache()
             repo.refresh_cache()  # 刷新 Polars 缓存
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.exception("pipeline failed")
             job_store.fail(job_id, str(e))
             invalidate_storage_cache()
         finally:
             release_run_slot()
 
-    asyncio.create_task(task())
+    _spawn_background(task())
     return {"job_id": job_id, "reused": False}
 
 
@@ -104,3 +114,104 @@ def list_jobs(limit: int = 20) -> dict:
         "active_id": job_store.active_id(),
         "jobs": job_store.list_recent(limit=limit),
     }
+
+
+# ================================================================
+# 手动历史增强 (§13)
+# ================================================================
+
+class EnhanceIn(BaseModel):
+    provider: str
+    start_date: str
+    end_date: str
+    asset_types: list[str] = Field(
+        default_factory=lambda: ["stock", "etf", "index"]
+    )
+    conflict: str = "keep_existing"
+
+
+@router.post("/enhance")
+async def enhance(request: Request, req: EnhanceIn) -> dict:
+    """异步触发历史数据增强(补缺, 不覆盖主数据)。立即返回 job_id。
+
+    约束:
+      - provider 必须是已加载 enhancer。
+      - start_date <= end_date。
+      - 首期只允许 conflict=keep_existing。
+    与盘后任务共享全局写入槽, 禁止并发修改 Parquet。
+    """
+    from datetime import date as _date
+
+    from app.data_providers import custom as custom_sources
+    from app.services.data_enhancement import EnhancementRequest, run_enhancement
+
+    repo = request.app.state.repo
+    try:
+        start = _date.fromisoformat(req.start_date)
+        end = _date.fromisoformat(req.end_date)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"日期格式错误: {e}") from e
+    if start > end:
+        raise HTTPException(status_code=400, detail="start_date 不能晚于 end_date")
+    if req.conflict != "keep_existing":
+        raise HTTPException(status_code=400, detail="首期只允许 conflict=keep_existing")
+    # 校验 provider 是已加载 enhancer
+    manifest = next((p for p in custom_sources.list_plugins() if p["name"] == req.provider), None)
+    if manifest is None or str(manifest.get("role", "")).lower() not in {"enhancer", "both"}:
+        raise HTTPException(status_code=400, detail=f"'{req.provider}' 不是已注册的增强源")
+    if not manifest.get("available"):
+        raise HTTPException(status_code=400, detail=f"'{req.provider}' 当前不可用: {manifest.get('status', '')}")
+    # 最大跨度 5 年
+    if (end - start).days > 365 * 5:
+        raise HTTPException(status_code=400, detail="单次跨度不得超过 5 年, 请分批执行")
+
+    try:
+        enhancement_req = EnhancementRequest(
+            provider=req.provider,
+            start_date=start,
+            end_date=end,
+            asset_types=tuple(req.asset_types),
+            conflict=req.conflict,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # 单飞: 复用活跃任务
+    job_store.reap_stale()
+    job_id, is_new = job_store.create()
+    if not is_new:
+        return {"job_id": job_id, "reused": True}
+
+    async def task() -> None:
+        if not try_acquire_run_slot():
+            job_store.fail(job_id, "已有数据任务在运行, 请稍后再试")
+            return
+        try:
+            job_store.start(job_id)
+            loop = asyncio.get_event_loop()
+
+            def progress(stage: str, pct: int, msg: str, stage_pct: int | None = None,
+                         skip_log: bool = False) -> None:
+                job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log)
+
+            summary = await loop.run_in_executor(
+                _long_task_executor,
+                lambda: run_enhancement(repo, enhancement_req, on_progress=progress),
+            )
+            job_store.succeed(job_id, {
+                "provider": summary.provider,
+                "inserted_rows": summary.inserted_rows,
+                "affected_symbols": summary.affected_symbols[:50],
+                "assets": summary.assets,
+            })
+            invalidate_storage_cache()
+            repo.refresh_cache()
+        except Exception as e:
+            logger.exception("enhance failed")
+            job_store.fail(job_id, str(e))
+            invalidate_storage_cache()
+        finally:
+            release_run_slot()
+
+    _spawn_background(task())
+    return {"job_id": job_id, "reused": False}

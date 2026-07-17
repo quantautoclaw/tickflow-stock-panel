@@ -734,7 +734,7 @@ export function Dashboard() {
         {data.indices.map(item => <IndexTicker key={item.symbol} item={item} />)}
       </div>
 
-      <div className="mb-1.5 grid grid-cols-6 gap-1">
+      <div className={`mb-1.5 grid gap-1 ${data.north_flow?.available ? 'grid-cols-7' : 'grid-cols-6'}`}>
         <KpiCell label="个股涨 / 平 / 跌" value={<><span className="text-bull">{data.breadth.up}</span><span className="text-muted">/</span><span className="text-muted">{data.breadth.flat}</span><span className="text-muted">/</span><span className="text-bear">{data.breadth.down}</span></>} sub={`上涨率 ${data.breadth.up_pct.toFixed(1)}%`} />
         <KpiCell label="强势 / 弱势" value={<><span className="text-bull">{strongUp}</span><span className="text-muted">/</span><span className="text-bear">{strongDown}</span></>} sub="涨跌 ≥3%" />
         <KpiCell label={<span className="inline-flex items-center gap-1">涨停 / 跌停<SealedBadge degraded={isSealedDegrade} hasDepth={hasDepth} isHistorical={false} sealedReady={sealedReady} sealedCountsUp={{ real: data.limit.limit_up, fake: data.limit.fake_up ?? 0, pending: 0 }} sealedCountsDown={{ real: data.limit.limit_down, fake: data.limit.fake_down ?? 0, pending: 0 }} rawUp={data.limit.limit_up + (data.limit.fake_up ?? 0)} rawDown={data.limit.limit_down + (data.limit.fake_down ?? 0)} invalidateKeys={['overview-market', 'limit-ladder']} /></span>} value={<><span className="text-bull">{data.limit.limit_up}</span><span className="text-muted">/</span><span className="text-bear">{data.limit.limit_down}</span></>} sub={`封板率 ${(data.limit.seal_rate ?? 0).toFixed(0)}%`} />
@@ -746,6 +746,14 @@ export function Dashboard() {
         })()} tone="accent" />
         <KpiCell label="成交额" value={fmtBigNum(data.amount.total)} sub={`均额 ${fmtBigNum(data.amount.avg)}`} />
         <KpiCell label="换手 / 量比" value={`${fmtPrice(data.activity.avg_turnover, 1)}% / ${fmtPrice(data.activity.vol_ratio, 2)}`} sub={`高换手 ${data.activity.high_turnover} · 放量占比 ${fmtPrice(data.activity.high_vol_ratio, 1)}%`} tone="accent" />
+        {data.north_flow?.available && (
+          <KpiCell
+            label="北向资金"
+            value={`${(data.north_flow.north_money_yi ?? 0) >= 0 ? '+' : ''}${fmtPrice(data.north_flow.north_money_yi, 1)}亿`}
+            sub={data.north_flow.date ? `${data.north_flow.date} · QuantX` : 'QuantX'}
+            tone={(data.north_flow.north_money_yi ?? 0) >= 0 ? 'bull' : 'bear'}
+          />
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-1.5 xl:grid-cols-[minmax(0,1fr)_20rem]">

@@ -25,9 +25,26 @@ runtime: python                          # 运行时类型: node | python | none
 entry: app.plugins.my_source.provider:MyProvider   # provider 类的导入路径
 check: app.plugins.my_source.bridge:availability   # 可用性检测函数(可选)
 datasets: [daily, adj_factor, minute, realtime]     # 支持的数据集
+role: provider                           # provider(可作主源) | enhancer(仅增强) | both
+asset_types: [stock, etf, index]         # 支持的资产类型 (增强源用)
 description: "数据源描述"
 install_hint: "pip install xxx"          # 未装依赖时显示的安装提示
 ```
+
+### role 与 asset_types
+
+`role` 决定插件在数据路由中的定位:
+
+| role | 含义 |
+|---|---|
+| `provider` | 可作为主数据源 (设置页「使用」) |
+| `enhancer` | 仅作增强源, 按 (symbol, 日期) 补缺, 不覆盖主数据 |
+| `both` | 两者都支持 |
+
+`asset_types` 声明插件覆盖的资产 (`stock` / `etf` / `index`), 增强源用它在设置页展示能力, 并约束历史补全的范围。
+
+设置页对 `role=enhancer/both` 的插件显示独立的「数据增强」区: 可启用/停用、试拉、查看配置说明。
+`runtime=none` 且不可用时, 不显示「安装」按钮, 改为显示 `install_hint`(配置说明)。
 
 ### runtime 字段说明
 
@@ -37,9 +54,9 @@ install_hint: "pip install xxx"          # 未装依赖时显示的安装提示
 | `node` | 需要 Node.js 运行时, `npm install` | stock-sdk(Docker 默认不打包,见 [deployment.md](./deployment.md)) |
 
 > stock-sdk 在 Docker 中默认不打包(合规考虑);如需启用,构建时传 `--build-arg INCLUDE_STOCKSDK=1`,开发模式下需手动 `npm install`。
-| `none` | 无额外依赖 | 纯 HTTP API 源 |
+| `none` | 项目不自动安装依赖 | 外部 monorepo、纯 HTTP API 源 |
 
-`runtime` 字段当前仅用于 UI 展示, 实际依赖检测由 `check` 函数负责。
+`runtime` 字段决定安装按钮行为；实际可用性仍由 `check` 函数负责。
 
 ### check 函数
 
@@ -109,6 +126,26 @@ class MyConfig:
   - `bridge.py` — Python↔Node 桥接 + availability 检测
   - `bridge.mjs` — Node 端(并发池、重试、SDK 解析)
   - `provider.py` — Provider 实现(归一化、分批、错误降级)
+- **`backend/app/plugins/quantx/`** — 增强源插件 (role=enhancer), 读取 QuantX DataStore
+  - `bridge.py` — quantx_data import + DataStore/HttpQuoteChain 单例 + availability
+  - `provider.py` — 不复权日K + 多源实时 + 维表
+  - 配置: 环境变量 `QUANTX_PACKAGES_PATH` + `QUANTDATA_ROOT`
+  - QuantX 标准日K必须满足 `volume=手、amount=元`。旧快照单位混杂时先审计：
+    `PYTHONPATH=$QUANTX_PACKAGES_PATH python backend/scripts/repair_quantx_bar_units.py --data-root $QUANTDATA_ROOT`
+    确认报告后加 `--apply`；脚本会逐文件备份并原子替换。
+
+## 数据增强与实时链路 (role=enhancer/both)
+
+增强源与主数据源解耦, 不会覆盖主数据:
+
+- **历史增强**: 启用后, 盘后管道(Step 1.8)与手动「数据页 → 增强补全」调用
+  `app/services/data_enhancement.py` 的 `run_enhancement()`, 按 `(symbol, date)` 补缺
+  (`merge_daily_asset(conflict="keep_existing")`), 再由现有 `indicators.pipeline` 统一复权。
+- **实时链路**: 设置「实时链路」(如 `QuantX → TickFlow`)后, 盘中行情走
+  `app/services/provider_chain.py` 的 `fetch_realtime_chain()`: 前序 provider 优先, 覆盖率
+  不足回退后续 provider。QuoteService 不再特判任何插件。
+- 两者偏好分别在 `data_enhancers` 与 `realtime_provider_chain`(preferences.json),
+  通过「设置 → 数据源」页面配置。
 
 ## 路由机制(无需关心, 仅参考)
 

@@ -351,6 +351,8 @@ export interface OverviewMarket {
   active_leaders: MarketSnapshotRow[]
   concept_rank: { leading: OverviewDimensionRankItem[]; lagging: OverviewDimensionRankItem[] }
   industry_rank: { leading: OverviewDimensionRankItem[]; lagging: OverviewDimensionRankItem[] }
+  /** 北向资金 (来源: QuantX 数据增强插件); 插件未启用/数据缺失时 available=false */
+  north_flow?: { available: boolean; date?: string; north_money_yi?: number }
 }
 
 // ===== 概念涨幅轮动矩阵 =====
@@ -535,6 +537,72 @@ export function genRuleId(): string {
   const ts = Date.now().toString(36)
   const rand = Math.random().toString(36).slice(2, 6)
   return `mr_${ts}_${rand}`
+}
+
+// ===== QuantX 只读代理 =====
+// TickFlow 不执行交易, 这里只展示 QuantX 已生产化的只读数据(持仓/决策建议/告警/运行健康)。
+// QUANTX_API_BASE_URL 未配置或 QuantX 服务不可达时, available=false, 前端隐藏对应卡片。
+
+export interface QuantxPosition {
+  stock_code: string
+  name: string
+  volume: number
+  can_use_volume: number
+  avg_price: number
+  market_value: number
+  unrealized_pnl: number
+}
+
+export interface QuantxAsset {
+  cash: number
+  frozen_cash: number
+  market_value: number
+  total_asset: number
+}
+
+export interface QuantxPositionsResp {
+  available: boolean
+  error?: string
+  positions?: QuantxPosition[]
+  asset?: QuantxAsset | null
+  server_fetched_at?: string
+}
+
+export interface QuantxDecision {
+  symbol: string
+  action: string
+  score: number
+  price: number
+  pnl_pct: number
+  strategy: string
+  reasons: string
+  llm_note: string
+  severity: string
+  created_at: string
+}
+
+export interface QuantxDecisionsResp {
+  available: boolean
+  error?: string
+  decisions?: QuantxDecision[]
+  count?: number
+  minutes?: number
+}
+
+export interface QuantxAlertsResp {
+  available: boolean
+  error?: string
+  alerts?: { type: string; severity: string; message: string; symbol?: string; created_at: string; extra?: Record<string, unknown> }[]
+  count?: number
+  minutes?: number
+}
+
+export interface QuantxStatusResp {
+  available: boolean
+  error?: string
+  mode?: 'shallow' | 'deep'
+  generated_at?: string
+  [key: string]: unknown
 }
 
 // ===== Limit Ladder =====
@@ -760,6 +828,8 @@ export interface PluginDataSourceItem {
   status: string           // 可用性原因 (供 UI 显示)
   description: string
   install_hint: string     // 未装依赖时显示的安装命令
+  role?: 'provider' | 'enhancer' | 'both'
+  asset_types?: string[]   // stock / etf / index
 }
 
 export interface DataSourceLoadError {
@@ -831,6 +901,8 @@ export interface Preferences {
   minute_data_provider?: string
   realtime_data_provider?: string
   financial_data_provider?: string
+  data_enhancers?: string[]
+  realtime_provider_chain?: string[]
   realtime_watchlist_symbols?: string[]
   realtime_pull_stock?: boolean
   realtime_pull_etf?: boolean
@@ -975,8 +1047,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ provider, dataset, symbols }),
     }),
-  updateDataProviders: (cfg: Partial<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider' | 'financial_data_provider'>>) =>
-    request<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider'>>(
+  updateDataProviders: (cfg: Partial<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider' | 'financial_data_provider' | 'data_enhancers' | 'realtime_provider_chain'>>) =>
+    request<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider' | 'data_enhancers' | 'realtime_provider_chain'>>(
       '/api/settings/preferences/data-providers',
       { method: 'PUT', body: JSON.stringify(cfg) },
     ),
@@ -1037,6 +1109,15 @@ export const api = {
       final_sync_done?: boolean
       final_sync_failed?: string | null
       last_fetch_ms: number | null
+      // 实时 provider chain 可观测性 (§14.5)
+      realtime_provider_chain?: string[]
+      realtime_sources?: string[]
+      source_counts?: Record<string, number>
+      expected_symbols?: number
+      received_symbols?: number
+      coverage_ratio?: number
+      source_errors?: Record<string, string>
+      fallback_used?: boolean
     }>('/api/intraday/status'),
   quoteInterval: () =>
     request<{ interval: number; min_interval: number; max_interval: number }>(
@@ -1461,9 +1542,40 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  // 严谨引擎复核: 代理 QuantX rqalpha_native, 只翻译打分排名部分, 见后端
+  // quantx_strategy_translator 模块注释。translation_warnings 必须展示给用户。
+  strategyBacktestRigorous: (payload: {
+    strategy_id: string
+    start?: string | null
+    end?: string | null
+    initial_capital?: number
+    benchmark?: string
+  }) =>
+    request<{
+      ok: boolean
+      error?: string
+      translation_warnings: string[]
+      engine?: string
+      dialect?: string
+      benchmark?: string
+      equity_curve?: { date: string; value: number }[]
+      summary?: Record<string, unknown>
+      trades?: Record<string, unknown>[]
+      trade_count?: number
+      logs?: string[]
+    }>('/api/backtest/strategy/rigorous', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
   pipelineRun: () => request<{ job_id: string; reused: boolean }>(
     '/api/pipeline/run', { method: 'POST' },
   ),
+  enhanceData: (provider: string, startDate: string, endDate: string, assetTypes: string[]) =>
+    request<{ job_id: string; reused: boolean }>(
+      '/api/pipeline/enhance',
+      { method: 'POST', body: JSON.stringify({ provider, start_date: startDate, end_date: endDate, asset_types: assetTypes, conflict: 'keep_existing' }) },
+    ),
   pipelineJob: (id: string) => request<PipelineJob>(`/api/pipeline/jobs/${id}`),
   pipelineJobs: (limit = 20) =>
     request<{ active_id: string | null; jobs: PipelineJobSummary[] }>(
@@ -1599,6 +1711,13 @@ export const api = {
   extDataPresetFetch: (id: string) =>
     request<{ status: string; rows: number }>(
       `/api/ext-data/presets/${id}/fetch`,
+      { method: 'POST' },
+    ),
+
+  // QuantX 扩展表 (资金流/涨停明细/龙虎榜): 从本地 DataStore 同步, 非网络拉取
+  extDataQuantxSync: (id: string, days = 7) =>
+    request<{ status: string; rows: number; last_date: string }>(
+      `/api/ext-data/quantx/${id}/sync?days=${days}`,
       { method: 'POST' },
     ),
 
@@ -2017,6 +2136,34 @@ export const api = {
 
   alertsClear: () =>
     request<{ ok: boolean; cleared: number }>('/api/alerts', { method: 'DELETE' }),
+
+  // ===== QuantX 只读代理 (持仓/决策建议/告警/运行健康, 不涉及下单) =====
+  quantxPositions: () => request<QuantxPositionsResp>('/api/quantx/positions'),
+
+  quantxDecisions: (params?: { minutes?: number; action?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.minutes) qs.set('minutes', String(params.minutes))
+    if (params?.action) qs.set('action', params.action)
+    const s = qs.toString()
+    return request<QuantxDecisionsResp>(`/api/quantx/decisions${s ? `?${s}` : ''}`)
+  },
+
+  quantxAlerts: (minutes?: number) =>
+    request<QuantxAlertsResp>(`/api/quantx/alerts${minutes ? `?minutes=${minutes}` : ''}`),
+
+  quantxStatus: (deep?: boolean) =>
+    request<QuantxStatusResp>(`/api/quantx/status${deep ? '?deep=true' : ''}`),
+
+  quantxMarketReview: () =>
+    request<{ available: boolean; error?: string; date?: string; report?: string; generated_at?: string }>('/api/quantx/market-review'),
+
+  quantxRuns: (params?: { strategy?: string; limit?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.strategy) qs.set('strategy', params.strategy)
+    if (params?.limit) qs.set('limit', String(params.limit))
+    const s = qs.toString()
+    return request<{ available: boolean; error?: string; runs?: Record<string, unknown>[]; total?: number }>(`/api/quantx/runs${s ? `?${s}` : ''}`)
+  },
 
   alertDelete: (ts: number) =>
     request<{ ok: boolean }>(`/api/alerts/${ts}`, { method: 'DELETE' }),

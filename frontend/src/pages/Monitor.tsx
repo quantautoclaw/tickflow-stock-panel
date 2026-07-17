@@ -13,6 +13,7 @@ import { cnSignal } from '@/lib/signals'
 import { boardTag } from '@/components/stock-table/primitives'
 import { markSeen, resetBadge, leaveMonitorPage } from '@/lib/monitorBadge'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
+import { QuantxMonitorPanel } from '@/components/monitor/QuantxMonitorPanel'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { usePreferences } from '@/lib/useSharedQueries'
 
@@ -152,7 +153,9 @@ export function Monitor() {
     <div className="flex flex-col h-full">
       <PageHeader title="监控中心" subtitle="实时信号与规则管理" />
       <div className="flex-1 min-h-0 px-5 py-4">
-        <div className="mx-auto flex h-full max-w-7xl flex-col gap-4 lg:flex-row">
+        <div className="mx-auto flex h-full max-w-7xl flex-col">
+          <QuantxMonitorPanel />
+          <div className="flex min-h-0 flex-1 flex-col gap-4 lg:flex-row">
           {/* 左栏: 触发记录 */}
           <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface/40 shadow-lg shadow-black/5">
             <div className="flex items-center gap-3 border-b border-border/60 bg-surface/60 px-4 py-2.5">
@@ -230,6 +233,7 @@ export function Monitor() {
               />
             </div>
           </section>
+          </div>
         </div>
       </div>
 

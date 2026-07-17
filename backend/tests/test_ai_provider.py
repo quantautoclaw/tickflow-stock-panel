@@ -21,6 +21,15 @@ def test_normalize_openai_base_url_preserves_v1_base():
     assert normalize_openai_base_url("http://ai.zedbox.cn:8080/v1") == "http://ai.zedbox.cn:8080/v1"
 
 
+def test_normalize_openai_base_url_preserves_zhipu_versioned_bases():
+    assert normalize_openai_base_url("https://open.bigmodel.cn/api/paas/v4") == "https://open.bigmodel.cn/api/paas/v4"
+    assert normalize_openai_base_url("https://open.bigmodel.cn/api/coding/paas/v4") == "https://open.bigmodel.cn/api/coding/paas/v4"
+
+
+def test_normalize_openai_base_url_handles_empty_value():
+    assert normalize_openai_base_url("") == ""
+
+
 def test_normalize_openai_base_url_strips_chat_completions_path():
     assert normalize_openai_base_url("http://ai.zedbox.cn:8080/v1/chat/completions") == "http://ai.zedbox.cn:8080/v1"
 

@@ -1,0 +1,19 @@
+# QuantX 数据增强插件
+# 使用 QuantX 补充缺失日K、标的维表和实时行情 (增强, 非替代)。
+# TickFlow 继续作为默认主数据源; QuantX 按 (symbol, date) 补缺。
+#
+# runtime=none: 本项目不自动安装 QuantX (它是一个独立的 monorepo)。
+# 配置方式: 设置环境变量 QUANTX_PACKAGES_PATH 和 QUANTDATA_ROOT。
+# 不能直接 import 且未配置时, 插件显示为「未配置」, 不影响主功能。
+# 可用但数据目录缺失时, 显示具体原因 (见 bridge.availability)。
+
+name: quantx
+display_name: "QuantX 数据增强"
+runtime: none
+entry: app.plugins.quantx.provider:QuantXProvider
+check: app.plugins.quantx.bridge:availability
+datasets: [daily, realtime, instruments]
+role: enhancer
+asset_types: [stock, etf, index]
+description: "使用 QuantX 补充缺失日K、标的维表和实时行情。TickFlow 保持主数据源, 仅按 (symbol, date) 补缺。"
+install_hint: "请配置环境变量 QUANTX_PACKAGES_PATH (QuantX monorepo packages/ 目录) 和 QUANTDATA_ROOT (数据根目录)"

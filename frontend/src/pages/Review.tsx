@@ -21,6 +21,7 @@ import { cn } from '@/lib/cn'
 import { fmtBigNum } from '@/lib/format'
 import { PageHeader } from '@/components/PageHeader'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
+import { QuantxReviewCard } from '@/components/review/QuantxReviewCard'
 import { toast } from '@/components/Toast'
 import { usePreferences } from '@/lib/useSharedQueries'
 import { useReviewState } from '@/lib/useReviewStore'
@@ -271,6 +272,8 @@ export function Review() {
 
       <div className="min-h-full bg-[radial-gradient(circle_at_15%_-5%,rgba(59,130,246,0.10),transparent_30%),radial-gradient(circle_at_85%_5%,rgba(139,92,246,0.08),transparent_30%)] px-4 py-4 sm:px-6">
         <div className="mx-auto max-w-[1280px] space-y-3">
+
+          <QuantxReviewCard />
 
           {marketQuery.isLoading && !data ? (
             <div className="flex h-40 items-center justify-center">

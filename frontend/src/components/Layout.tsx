@@ -348,11 +348,32 @@ export function Layout() {
   const isNoneTier = tier < 0
   const isWatchlistMode = tier === 0
   const realtimeModeLabel = isWatchlistMode ? '自选股' : '全市场'
-  // 当前实时行情数据源名称 (custom 时显示源名, tickflow 时不显示)
+  // 当前实时行情数据源名称: 优先用 provider chain 的真实来源 (§14.5), 回退旧 preference
   const realtimeProvider = prefs?.realtime_data_provider
-  const realtimeProviderName = realtimeProvider && realtimeProvider !== 'tickflow'
-    ? (dataSources?.custom?.find(s => s.name === realtimeProvider)?.display_name || realtimeProvider)
+  const chainSources = quoteStatus?.realtime_sources
+  const coveragePct = quoteStatus?.coverage_ratio != null
+    ? Math.round((quoteStatus.coverage_ratio ?? 0) * 100)
     : null
+  // 把来源 tag (quantx:sina) 转成友好名
+  const sourceLabel = (tag: string): string => {
+    if (tag.startsWith('quantx:')) {
+      const sub = tag.split(':')[1] || ''
+      return sub ? `QuantX · ${sub}` : 'QuantX'
+    }
+    if (tag === 'tickflow') return 'TickFlow'
+    return tag
+  }
+  const configuredExternalChain = (prefs?.realtime_provider_chain ?? []).filter(n => n !== 'tickflow')
+  const configuredChainText = configuredExternalChain.length > 0
+    ? configuredExternalChain
+        .map(n => dataSources?.plugins?.find(p => p.name === n)?.display_name || n)
+        .join(' → ')
+    : null
+  const realtimeSourceText = chainSources && chainSources.length > 0
+    ? chainSources.map(sourceLabel).join(' + ')
+    : (configuredChainText || (realtimeProvider && realtimeProvider !== 'tickflow'
+        ? (dataSources?.custom?.find(s => s.name === realtimeProvider)?.display_name || realtimeProvider)
+        : null))
 
   // 当前主数据源 (用于菜单底部状态条)
   const activeProvider = prefs?.daily_data_provider || 'tickflow'
@@ -543,7 +564,7 @@ export function Layout() {
 
         {/* 全局行情开关 */}
         <div className="border-t border-border px-3 py-2.5 shrink-0">
-          {isNoneTier && !realtimeProviderName ? (
+          {isNoneTier && !realtimeSourceText ? (
             <div>
               <div className="flex items-center justify-between">
                 <span className="text-xs text-secondary truncate">实时行情</span>
@@ -577,7 +598,10 @@ export function Layout() {
                       : 'bg-muted'
                 }`} />
                 <span className="text-xs text-secondary truncate">
-                  实时行情 · {realtimeProviderName || realtimeModeLabel}
+                  实时行情 · {realtimeSourceText || realtimeModeLabel}
+                  {chainSources && coveragePct != null && (
+                    <span className="text-muted/50"> · 覆盖 {coveragePct}%</span>
+                  )}
                 </span>
                 <button
                   onClick={() => navigate('/settings?tab=monitoring')}
@@ -605,9 +629,9 @@ export function Layout() {
           )}
 
           {/* 状态提示 */}
-          {realtimeEnabled && (!isNoneTier || realtimeProviderName) && (
+          {realtimeEnabled && (!isNoneTier || realtimeSourceText) && (
             <div className="mt-1.5 text-[10px] leading-snug space-y-0.5">
-              {isWatchlistMode && !dismissFreeHint && !realtimeProviderName && (
+              {isWatchlistMode && !dismissFreeHint && !realtimeSourceText && (
                 <div className="flex items-start gap-1 text-amber-400/80">
                   <span className="flex-1">监控自选股前 5 只，全市场监控需 Starter+</span>
                   <button

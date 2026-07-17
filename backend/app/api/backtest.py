@@ -244,6 +244,51 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
     return run_worker_task(task)
 
 
+class RigorousBacktestRequest(BaseModel):
+    strategy_id: str
+    start: date | None = None
+    end: date | None = None
+    initial_capital: float = 1_000_000.0
+    benchmark: str = "000300.SH"
+
+
+@router.post("/strategy/rigorous")
+async def strategy_run_rigorous(req: RigorousBacktestRequest, request: Request):
+    """严谨引擎复核 — 把策略的打分排名部分翻译为 QuantX StrategyConfig,
+    代理 QuantX rqalpha_native 引擎跑一次事件驱动回测。
+
+    只翻译 scoring(打分权重) + limit(选股数) + 止损/持有期上限 + exclude_st,
+    不包含策略自定义的 filter() 技术形态判断 —— 见 quantx_strategy_translator
+    模块注释。返回的 translation_warnings 必须展示给用户, 不能被当作与
+    TickFlow 原策略等价的验证结果。QUANTX_API_BASE_URL 未配置时返回 ok=False。
+    """
+    from app.services.quantx_backtest_adapter import run_rigorous_backtest
+
+    engine = request.app.state.strategy_engine
+    if not engine.has(req.strategy_id):
+        raise HTTPException(404, f"未知策略: {req.strategy_id}")
+    strategy = engine.get(req.strategy_id)
+
+    end = req.end or date.today()
+    start = _resolve_start(req, end, STRATEGY_DEFAULT_DAYS)
+
+    result = await run_rigorous_backtest(
+        strategy_id=req.strategy_id,
+        scoring=strategy.meta.get("scoring") or {},
+        limit=strategy.meta.get("limit") or 50,
+        basic_filter=strategy.basic_filter,
+        stop_loss=strategy.stop_loss,
+        max_hold_days=strategy.max_hold_days,
+        start_date=start.isoformat(),
+        end_date=end.isoformat(),
+        initial_capital=req.initial_capital,
+        benchmark=req.benchmark,
+    )
+    if not result.ok:
+        return {"ok": False, "error": result.error, "translation_warnings": result.translation_warnings}
+    return {"ok": True, "translation_warnings": result.translation_warnings, **result.result}
+
+
 # ── SSE 流式回测 (实时进度 + 可取消 + 支持重连) ───────────────────
 
 import time

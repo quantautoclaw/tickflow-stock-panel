@@ -169,6 +169,8 @@ def normalize_openai_base_url(url: str) -> str:
     base = (url or "").strip().rstrip("/")
     if base.endswith("/chat/completions"):
         base = base[: -len("/chat/completions")].rstrip("/")
+    if not base:
+        return ""
     if _VERSION_SEGMENT_RE.search(base):
         return base
     return f"{base}/v1"

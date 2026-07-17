@@ -1,10 +1,11 @@
 """全局配置 — 从环境变量 / .env 读取。"""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ── 运行环境检测 ──────────────────────────────────────────
@@ -108,6 +109,36 @@ class Settings(BaseSettings):
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()
 
+    # QuantX 数据增强插件(可选): 通过 plugins/quantx 插件机制接入, 留空时插件显示为
+    # 未配置, 不影响主功能。不再使用 data_backend 总开关。
+    # QUANTX_PACKAGES_PATH: 指向 QuantX monorepo 的 packages/ (import quantx_data 用);
+    #   若当前 Python 环境已可直接 import quantx_data, 可留空。
+    # QUANTDATA_ROOT: 指向 QuantX 数据根目录。
+    quantx_packages_path: Path = Field(
+        default=Path(),
+        description="QuantX monorepo packages/ 目录(import quantx_data 用), 留空表示环境可直接 import",
+    )
+    quantx_data_root: Path = Field(
+        default=Path(),
+        validation_alias=AliasChoices("QUANTDATA_ROOT", "quantx_data_root"),
+        description="QuantX 数据根目录(QUANTDATA_ROOT)",
+    )
+
+    # QuantX apps/api 只读代理(可选): TickFlow 不执行交易, 只代理展示 QuantX 的持仓/
+    # 决策建议/告警/健康状态。留空时相关只读端点返回 unavailable, 不影响主功能。
+    quantx_api_base_url: str = Field(
+        default="",
+        description="QuantX apps/api 地址 (如 http://127.0.0.1:8000), 留空表示未启用只读代理",
+    )
+    quantx_api_timeout: float = Field(
+        default=5.0, gt=0,
+        description="QuantX apps/api 只读代理请求超时秒数",
+    )
+    quantx_backtest_timeout: float = Field(
+        default=300.0, gt=0,
+        description="QuantX 严谨回测(POST /api/strategies/execute-config)请求超时秒数, "
+        "明显长于只读代理, 因为 rqalpha 事件驱动回测可能耗时数分钟",
+    )
     # tiers.yaml 路径 — frozen: 资源目录内; 非 frozen: 项目根目录
     tiers_yaml: Path = _RESOURCE_ROOT / "tiers.yaml" if _IS_FROZEN else _PROJECT_ROOT / "tiers.yaml"
 
@@ -117,9 +148,21 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _resolve_paths(self) -> Settings:
         """确保 data_dir 是绝对路径（环境变量传入的相对路径基于项目根目录解析）。"""
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
         if not self.data_dir.is_absolute():
             # 相对路径基于项目根目录解析，而非 CWD
             self.data_dir = (_PROJECT_ROOT / self.data_dir).resolve()
+        # QuantX 路径(非空时)基于项目根目录解析(便于用相对路径配置)
+        for attr in ("quantx_packages_path", "quantx_data_root"):
+            p = getattr(self, attr)
+            if str(p) and str(p) != "." and not p.is_absolute():
+                setattr(self, attr, (_PROJECT_ROOT / p).resolve())
+        # DATA_BACKEND 不再进入 Settings，仅为旧环境输出一次迁移提示。
+        if os.getenv("DATA_BACKEND", "").lower() == "quantx":
+            _log.warning(
+                "DATA_BACKEND=quantx 已废弃, 请在『设置 → 数据源 → 数据增强』启用 QuantX 插件"
+            )
         if self.backtest_matrix_cache_max_mb <= 0:
             raise ValueError("backtest_matrix_cache_max_mb must be positive")
         if self.backtest_matrix_cache_prewarm_years <= 0:

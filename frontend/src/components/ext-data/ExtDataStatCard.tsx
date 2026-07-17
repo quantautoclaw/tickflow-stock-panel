@@ -7,6 +7,7 @@ import { QK } from '@/lib/queryKeys'
 import { SettingsModal } from '@/components/data/SettingsModal'
 import { ExtDataPullPanel } from './ExtDataPullPanel'
 import { ExtDataApiPanel } from './ExtDataApiPanel'
+import { QUANTX_EXT_PRESET_IDS, QuantxExtSyncPanel } from './QuantxExtSyncPanel'
 
 export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
   config: ExtDataConfig
@@ -53,6 +54,7 @@ export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
   })
 
   const doUpload = (file: File) => upload.mutate({ id: config.id, file })
+  const isQuantxPreset = QUANTX_EXT_PRESET_IDS.includes(config.id)
 
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -170,74 +172,80 @@ export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
                 修复代码格式
               </button>
 
-              <div className="flex gap-1 rounded-lg bg-elevated/60 p-0.5">
-                <button
-                  onClick={() => setIngestTab('pull')}
-                  className={`flex-1 inline-flex items-center justify-center gap-1 py-1.5 rounded-md text-[10px] font-medium transition-colors ${
-                    ingestTab === 'pull' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'
-                  }`}
-                >
-                  <RefreshCw className="h-3 w-3" />拉取
-                </button>
-                <button
-                  onClick={() => setIngestTab('api')}
-                  className={`flex-1 inline-flex items-center justify-center gap-1 py-1.5 rounded-md text-[10px] font-medium transition-colors ${
-                    ingestTab === 'api' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'
-                  }`}
-                >
-                  <Code className="h-3 w-3" />推送
-                </button>
-                <button
-                  onClick={() => setIngestTab('file')}
-                  className={`flex-1 inline-flex items-center justify-center gap-1 py-1.5 rounded-md text-[10px] font-medium transition-colors ${
-                    ingestTab === 'file' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'
-                  }`}
-                >
-                  <Upload className="h-3 w-3" />上传
-                </button>
-              </div>
-
-              {ingestTab === 'pull' ? (
-                <ExtDataPullPanel config={config} onSaved={() => qc.invalidateQueries({ queryKey: QK.extData })} />
-              ) : ingestTab === 'api' ? (
-                <ExtDataApiPanel config={config} copied={copied} setCopied={setCopied} />
+              {isQuantxPreset ? (
+                <QuantxExtSyncPanel config={config} onSynced={() => qc.invalidateQueries({ queryKey: QK.extData })} />
               ) : (
                 <>
-                  <input
-                    ref={fileRef}
-                    type="file"
-                    accept=".csv,.xlsx,.xls"
-                    className="hidden"
-                    onChange={handleFile}
-                  />
-                  <div
-                    onClick={() => fileRef.current?.click()}
-                    onDragOver={e => { e.preventDefault(); setDragOver(true) }}
-                    onDragLeave={() => setDragOver(false)}
-                    onDrop={handleDrop}
-                    className={`relative cursor-pointer rounded-lg border-2 border-dashed transition-colors py-5 flex flex-col items-center justify-center gap-1.5 ${
-                      dragOver
-                        ? 'border-accent bg-accent/10'
-                        : uploading
-                          ? 'border-border/50 bg-elevated/30 pointer-events-none'
-                          : 'border-border/40 hover:border-accent/50 hover:bg-accent/[0.03]'
-                    }`}
-                  >
-                    {uploading ? (
-                      <>
-                        <Loader2 className="h-5 w-5 text-accent animate-spin" />
-                        <span className="text-[11px] text-muted">上传中…</span>
-                      </>
-                    ) : (
-                      <>
-                        <Upload className={`h-5 w-5 ${dragOver ? 'text-accent' : 'text-muted'}`} />
-                        <span className={`text-[11px] ${dragOver ? 'text-accent' : 'text-secondary'}`}>
-                          拖拽文件到此处上传
-                        </span>
-                        <span className="text-[10px] text-muted">支持 CSV / Excel，需包含 symbol 列</span>
-                      </>
-                    )}
+                  <div className="flex gap-1 rounded-lg bg-elevated/60 p-0.5">
+                    <button
+                      onClick={() => setIngestTab('pull')}
+                      className={`flex-1 inline-flex items-center justify-center gap-1 py-1.5 rounded-md text-[10px] font-medium transition-colors ${
+                        ingestTab === 'pull' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'
+                      }`}
+                    >
+                      <RefreshCw className="h-3 w-3" />拉取
+                    </button>
+                    <button
+                      onClick={() => setIngestTab('api')}
+                      className={`flex-1 inline-flex items-center justify-center gap-1 py-1.5 rounded-md text-[10px] font-medium transition-colors ${
+                        ingestTab === 'api' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'
+                      }`}
+                    >
+                      <Code className="h-3 w-3" />推送
+                    </button>
+                    <button
+                      onClick={() => setIngestTab('file')}
+                      className={`flex-1 inline-flex items-center justify-center gap-1 py-1.5 rounded-md text-[10px] font-medium transition-colors ${
+                        ingestTab === 'file' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'
+                      }`}
+                    >
+                      <Upload className="h-3 w-3" />上传
+                    </button>
                   </div>
+
+                  {ingestTab === 'pull' ? (
+                    <ExtDataPullPanel config={config} onSaved={() => qc.invalidateQueries({ queryKey: QK.extData })} />
+                  ) : ingestTab === 'api' ? (
+                    <ExtDataApiPanel config={config} copied={copied} setCopied={setCopied} />
+                  ) : (
+                    <>
+                      <input
+                        ref={fileRef}
+                        type="file"
+                        accept=".csv,.xlsx,.xls"
+                        className="hidden"
+                        onChange={handleFile}
+                      />
+                      <div
+                        onClick={() => fileRef.current?.click()}
+                        onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+                        onDragLeave={() => setDragOver(false)}
+                        onDrop={handleDrop}
+                        className={`relative cursor-pointer rounded-lg border-2 border-dashed transition-colors py-5 flex flex-col items-center justify-center gap-1.5 ${
+                          dragOver
+                            ? 'border-accent bg-accent/10'
+                            : uploading
+                              ? 'border-border/50 bg-elevated/30 pointer-events-none'
+                              : 'border-border/40 hover:border-accent/50 hover:bg-accent/[0.03]'
+                        }`}
+                      >
+                        {uploading ? (
+                          <>
+                            <Loader2 className="h-5 w-5 text-accent animate-spin" />
+                            <span className="text-[11px] text-muted">上传中…</span>
+                          </>
+                        ) : (
+                          <>
+                            <Upload className={`h-5 w-5 ${dragOver ? 'text-accent' : 'text-muted'}`} />
+                            <span className={`text-[11px] ${dragOver ? 'text-accent' : 'text-secondary'}`}>
+                              拖拽文件到此处上传
+                            </span>
+                            <span className="text-[10px] text-muted">支持 CSV / Excel，需包含 symbol 列</span>
+                          </>
+                        )}
+                      </div>
+                    </>
+                  )}
                 </>
               )}
 

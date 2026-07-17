@@ -81,6 +81,11 @@ export const QK = {
 
   // 概念涨幅轮动矩阵
   rpsRotation:          (days: number) => ['rps-rotation', days] as const,
+
+  // QuantX 只读代理 (持仓/决策建议/运行健康)
+  quantxStatus:         ['quantx-status'] as const,
+  quantxPositions:      ['quantx-positions'] as const,
+  quantxDecisions:      ['quantx-decisions'] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====

@@ -123,6 +123,17 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("QUANTDATA_ROOT", "quantx_data_root"),
         description="QuantX 数据根目录(QUANTDATA_ROOT)",
     )
+
+    # QuantX apps/api 只读代理(可选): TickFlow 不执行交易, 只代理展示 QuantX 的持仓/
+    # 决策建议/告警/健康状态。留空时相关只读端点返回 unavailable, 不影响主功能。
+    quantx_api_base_url: str = Field(
+        default="",
+        description="QuantX apps/api 地址 (如 http://127.0.0.1:8000), 留空表示未启用只读代理",
+    )
+    quantx_api_timeout: float = Field(
+        default=5.0, gt=0,
+        description="QuantX apps/api 代理请求超时秒数",
+    )
     # tiers.yaml 路径 — frozen: 资源目录内; 非 frozen: 项目根目录
     tiers_yaml: Path = _RESOURCE_ROOT / "tiers.yaml" if _IS_FROZEN else _PROJECT_ROOT / "tiers.yaml"
 

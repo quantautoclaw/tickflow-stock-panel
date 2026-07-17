@@ -539,6 +539,72 @@ export function genRuleId(): string {
   return `mr_${ts}_${rand}`
 }
 
+// ===== QuantX 只读代理 =====
+// TickFlow 不执行交易, 这里只展示 QuantX 已生产化的只读数据(持仓/决策建议/告警/运行健康)。
+// QUANTX_API_BASE_URL 未配置或 QuantX 服务不可达时, available=false, 前端隐藏对应卡片。
+
+export interface QuantxPosition {
+  stock_code: string
+  name: string
+  volume: number
+  can_use_volume: number
+  avg_price: number
+  market_value: number
+  unrealized_pnl: number
+}
+
+export interface QuantxAsset {
+  cash: number
+  frozen_cash: number
+  market_value: number
+  total_asset: number
+}
+
+export interface QuantxPositionsResp {
+  available: boolean
+  error?: string
+  positions?: QuantxPosition[]
+  asset?: QuantxAsset | null
+  server_fetched_at?: string
+}
+
+export interface QuantxDecision {
+  symbol: string
+  action: string
+  score: number
+  price: number
+  pnl_pct: number
+  strategy: string
+  reasons: string
+  llm_note: string
+  severity: string
+  created_at: string
+}
+
+export interface QuantxDecisionsResp {
+  available: boolean
+  error?: string
+  decisions?: QuantxDecision[]
+  count?: number
+  minutes?: number
+}
+
+export interface QuantxAlertsResp {
+  available: boolean
+  error?: string
+  alerts?: { type: string; severity: string; message: string; symbol?: string; created_at: string; extra?: Record<string, unknown> }[]
+  count?: number
+  minutes?: number
+}
+
+export interface QuantxStatusResp {
+  available: boolean
+  error?: string
+  mode?: 'shallow' | 'deep'
+  generated_at?: string
+  [key: string]: unknown
+}
+
 // ===== Limit Ladder =====
 export interface LimitLadderStock {
   symbol: string
@@ -2044,6 +2110,23 @@ export const api = {
 
   alertsClear: () =>
     request<{ ok: boolean; cleared: number }>('/api/alerts', { method: 'DELETE' }),
+
+  // ===== QuantX 只读代理 (持仓/决策建议/告警/运行健康, 不涉及下单) =====
+  quantxPositions: () => request<QuantxPositionsResp>('/api/quantx/positions'),
+
+  quantxDecisions: (params?: { minutes?: number; action?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.minutes) qs.set('minutes', String(params.minutes))
+    if (params?.action) qs.set('action', params.action)
+    const s = qs.toString()
+    return request<QuantxDecisionsResp>(`/api/quantx/decisions${s ? `?${s}` : ''}`)
+  },
+
+  quantxAlerts: (minutes?: number) =>
+    request<QuantxAlertsResp>(`/api/quantx/alerts${minutes ? `?minutes=${minutes}` : ''}`),
+
+  quantxStatus: (deep?: boolean) =>
+    request<QuantxStatusResp>(`/api/quantx/status${deep ? '?deep=true' : ''}`),
 
   alertDelete: (ts: number) =>
     request<{ ok: boolean }>(`/api/alerts/${ts}`, { method: 'DELETE' }),

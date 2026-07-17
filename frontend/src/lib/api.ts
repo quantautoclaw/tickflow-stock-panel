@@ -726,6 +726,8 @@ export interface PluginDataSourceItem {
   status: string           // 可用性原因 (供 UI 显示)
   description: string
   install_hint: string     // 未装依赖时显示的安装命令
+  role?: 'provider' | 'enhancer' | 'both'
+  asset_types?: string[]   // stock / etf / index
 }
 
 export interface DataSourceLoadError {
@@ -787,6 +789,8 @@ export interface Preferences {
   minute_data_provider?: string
   realtime_data_provider?: string
   financial_data_provider?: string
+  data_enhancers?: string[]
+  realtime_provider_chain?: string[]
   realtime_watchlist_symbols?: string[]
   realtime_pull_stock?: boolean
   realtime_pull_etf?: boolean
@@ -914,8 +918,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ provider, dataset, symbols }),
     }),
-  updateDataProviders: (cfg: Partial<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider' | 'financial_data_provider'>>) =>
-    request<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider'>>(
+  updateDataProviders: (cfg: Partial<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider' | 'financial_data_provider' | 'data_enhancers' | 'realtime_provider_chain'>>) =>
+    request<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider' | 'data_enhancers' | 'realtime_provider_chain'>>(
       '/api/settings/preferences/data-providers',
       { method: 'PUT', body: JSON.stringify(cfg) },
     ),
@@ -971,6 +975,15 @@ export const api = {
       final_sync_done?: boolean
       final_sync_failed?: string | null
       last_fetch_ms: number | null
+      // 实时 provider chain 可观测性 (§14.5)
+      realtime_provider_chain?: string[]
+      realtime_sources?: string[]
+      source_counts?: Record<string, number>
+      expected_symbols?: number
+      received_symbols?: number
+      coverage_ratio?: number
+      source_errors?: Record<string, string>
+      fallback_used?: boolean
     }>('/api/intraday/status'),
   quoteInterval: () =>
     request<{ interval: number; min_interval: number; max_interval: number }>(
@@ -1352,6 +1365,11 @@ export const api = {
   pipelineRun: () => request<{ job_id: string; reused: boolean }>(
     '/api/pipeline/run', { method: 'POST' },
   ),
+  enhanceData: (provider: string, startDate: string, endDate: string, assetTypes: string[]) =>
+    request<{ job_id: string; reused: boolean }>(
+      '/api/pipeline/enhance',
+      { method: 'POST', body: JSON.stringify({ provider, start_date: startDate, end_date: endDate, asset_types: assetTypes, conflict: 'keep_existing' }) },
+    ),
   pipelineJob: (id: string) => request<PipelineJob>(`/api/pipeline/jobs/${id}`),
   pipelineJobs: (limit = 20) =>
     request<{ active_id: string | null; jobs: PipelineJobSummary[] }>(

@@ -32,6 +32,20 @@ import {
   type ColumnConfig,
 } from '@/lib/screener-columns'
 
+type AggregateMode = 'union' | 'resonance' | 'intersection'
+
+const AGGREGATE_MODES: Array<{ mode: AggregateMode; label: string; title: string }> = [
+  { mode: 'union', label: '并集', title: '显示策略池任一策略命中的股票' },
+  { mode: 'resonance', label: '共振', title: '仅显示被至少 2 个策略共同命中的股票' },
+  { mode: 'intersection', label: '交集', title: '仅显示被策略池全部策略共同命中的股票' },
+]
+
+const AGGREGATE_LABELS: Record<AggregateMode, string> = {
+  union: '并集',
+  resonance: '共振',
+  intersection: '交集',
+}
+
 export function Screener() {
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
   const [activeStrategy, setActiveStrategy] = useState<string | null>(null)
@@ -48,6 +62,7 @@ export function Screener() {
   const [showStore, setShowStore] = useState(false)
   const { pool, addToPool, removeFromPool, reorderPool, prune } = useStrategyPool()
   const [cardSize, setCardSize] = useState<CardSize>(loadCardSize)
+  const [aggregateMode, setAggregateMode] = useState<AggregateMode | null>(null)
   // 日k蜡烛图显示开关（仅当 candle 列可见时才有意义；持久化）
   const [dailyKChartVisible, setDailyKChartVisible] = useState<boolean>(() => storage.screenerCandle.get(true))
   const toggleDailyKChart = useCallback(() => {
@@ -57,7 +72,6 @@ export function Screener() {
       return next
     })
   }, [])
-  const [showAll, setShowAll] = useState(false)
   const [showFilter, setShowFilter] = useState(false)
   const [filter, setFilter] = useState<ScreenerFilterType>(defaultFilter)
   const filterMap = useRef<Map<string, ScreenerFilterType>>(new Map())
@@ -241,38 +255,57 @@ export function Screener() {
     }
   }, [effectiveResults, cachedQuery.data, activeStrategy])
 
-  // symbol → 所属策略列表 (来自 effectiveResults)
+  // 聚合模式只使用当前策略池，避免盘后缓存中的池外策略混入结果。
+  const poolResults = useMemo(() => {
+    if (!effectiveResults) return []
+    return visiblePool.flatMap(sid => {
+      const r = effectiveResults[sid]
+      // 切换日期后的旧 runAll 数据不能混入新日期聚合。
+      return r && (!asOf || r.as_of === asOf) ? [[sid, r] as const] : []
+    })
+  }, [effectiveResults, visiblePool, asOf])
+
+  // symbol → 当前策略池内命中它的策略列表。
   const symbolStrategyMap = useMemo(() => {
     const map = new Map<string, string[]>()
-    if (!effectiveResults) return map
-    for (const [sid, r] of Object.entries(effectiveResults)) {
+    for (const [sid, r] of poolResults) {
       for (const row of r.rows) {
         const arr = map.get(row.symbol)
         if (arr) {
-          arr.push(sid)
+          if (!arr.includes(sid)) arr.push(sid)
         } else {
           map.set(row.symbol, [sid])
         }
       }
     }
     return map
-  }, [effectiveResults])
+  }, [poolResults])
 
-  // "全部" 模式: 合并所有策略的去重个股
-  const allRows = useMemo(() => {
-    if (!effectiveResults) return []
-    const seen = new Set<string>()
-    const merged: any[] = []
-    for (const r of Object.values(effectiveResults)) {
+  // 多策略聚合结果：并集=任一命中；共振=至少 2 个；交集=策略池全部命中。
+  // 同一股票在不同策略中评分不同时，展示评分最高的那条，其策略归属由上面的 map 完整呈现。
+  const aggregateRows = useMemo(() => {
+    if (!aggregateMode || !effectiveResults) return []
+    if (aggregateMode !== 'union' && visiblePool.length < 2) return []
+    // 严格交集必须等策略池内所有结果就绪，不能拿部分结果计算。
+    if (aggregateMode === 'intersection' && poolResults.length !== visiblePool.length) return []
+
+    const merged = new Map<string, any>()
+    for (const [, r] of poolResults) {
       for (const row of r.rows) {
-        if (!seen.has(row.symbol)) {
-          seen.add(row.symbol)
-          merged.push(row)
-        }
+        const current = merged.get(row.symbol)
+        const score = Number(row.score ?? Number.NEGATIVE_INFINITY)
+        const currentScore = Number(current?.score ?? Number.NEGATIVE_INFINITY)
+        if (!current || score > currentScore) merged.set(row.symbol, row)
       }
     }
-    return merged
-  }, [effectiveResults])
+
+    const required = aggregateMode === 'union'
+      ? 1
+      : aggregateMode === 'resonance'
+        ? 2
+        : visiblePool.length
+    return [...merged.values()].filter(row => (symbolStrategyMap.get(row.symbol)?.length ?? 0) >= required)
+  }, [aggregateMode, effectiveResults, poolResults, symbolStrategyMap, visiblePool])
 
   // 计算失效行: 在 today_ever_rows 中但不在当前 results 中
   const expiredRowsMap = useMemo(() => {
@@ -294,29 +327,35 @@ export function Screener() {
   // 表头排序（受控）：用户点击列则按该列；未点时下方按评分默认降序
   const { sort, toggle, sortRows } = useTableSort()
 
-  // 当前显示的行数据 (全部模式 或 单策略模式) + 失效行
+  // 当前显示的行数据（多策略聚合或单策略）+ 单策略失效行。
   const displayRows = useMemo(() => {
-    let rows = showAll
-      ? applyFilter(allRows, filter)
+    let rows = aggregateMode
+      ? applyFilter(aggregateRows, filter)
       : filteredRows
-    // 排序：用户点了表头则按该列，否则默认评分降序
+    // 聚合模式默认优先显示命中策略更多的股票，再按评分降序；手动点表头后服从表头排序。
     rows = sort
       ? sortRows(rows, columns)
-      : [...rows].sort((a, b) => (b.score ?? -Infinity) - (a.score ?? -Infinity))
-    const limit = !showAll && activeStrategy
+      : [...rows].sort((a, b) => {
+          if (aggregateMode) {
+            const countDiff = (symbolStrategyMap.get(b.symbol)?.length ?? 0) - (symbolStrategyMap.get(a.symbol)?.length ?? 0)
+            if (countDiff !== 0) return countDiff
+          }
+          return (b.score ?? -Infinity) - (a.score ?? -Infinity)
+        })
+    const limit = !aggregateMode && activeStrategy
       ? strategyLimits[activeStrategy] ?? null
       : null
     const mainRows = limit != null ? rows.slice(0, limit) : rows
 
     // 追加当前策略的失效行 (灰色)
-    if (!showAll && activeStrategy) {
+    if (!aggregateMode && activeStrategy) {
       const expired = expiredRowsMap.get(activeStrategy) ?? []
       if (expired.length > 0) {
         return [...mainRows, ...expired]
       }
     }
     return mainRows
-  }, [showAll, allRows, filteredRows, filter, activeStrategy, strategyLimits, expiredRowsMap, sort, sortRows, columns])
+  }, [aggregateMode, aggregateRows, filteredRows, filter, activeStrategy, strategyLimits, expiredRowsMap, sort, sortRows, columns, symbolStrategyMap])
 
   // 日k列是否启用 → 决定是否加载批量 kline 数据
   const candleColumn = useMemo(() =>
@@ -381,7 +420,7 @@ export function Screener() {
   const handleRun = (s: ScreenerStrategy) => {
     handleStrategySwitch(s.id)
     setActiveStrategy(s.id)
-    setShowAll(false)
+    setAggregateMode(null)
     // ETF 模式: 无股票盘后缓存, 始终实时单跑。
     // 传空日期让后端用 ETF 自己的最新交易日 (asOf 跟随的是股票 enriched, 两者可能不同日)。
     if (assetType !== 'stock') {
@@ -495,6 +534,13 @@ export function Screener() {
     }
   }
 
+  const handleAggregateMode = useCallback((mode: AggregateMode) => {
+    setAggregateMode(mode)
+    setActiveStrategy(null)
+    setFilter({ ...defaultFilter })
+    setShowFilter(false)
+  }, [])
+
   const handleBatchAdd = () => {
     if (!displayRows.length) return
     const symbols = displayRows.map((r: any) => r.symbol)
@@ -523,7 +569,7 @@ export function Screener() {
               {(['stock', 'etf'] as const).map(t => (
                 <button
                   key={t}
-                  onClick={() => { setAssetType(t); setActiveStrategy(null); setResult(null); setShowAll(false) }}
+                  onClick={() => { setAssetType(t); setActiveStrategy(null); setResult(null); setAggregateMode(null) }}
                   className={`h-full px-2.5 text-xs font-medium transition-colors cursor-pointer
                     ${assetType === t
                       ? 'bg-accent/10 text-accent'
@@ -555,18 +601,30 @@ export function Screener() {
                 max={maxDate}
               />
             )}
-            {/* 全部切换 */}
-            <button
-              onClick={() => setShowAll(v => { if (!v) setActiveStrategy(null); return !v })}
-              title="显示全部策略个股"
-              className={`inline-flex items-center justify-center h-7 w-7 rounded-btn border transition-colors cursor-pointer
-                ${showAll
-                  ? 'border-accent/50 bg-accent/10 text-accent'
-                  : 'border-border bg-surface text-muted hover:text-secondary hover:border-accent/40'
-                }`}
-            >
-              <Network className="h-3.5 w-3.5" />
-            </button>
+            {/* 多策略聚合：并集 / 至少两个策略共振 / 策略池严格交集 */}
+            <div className="flex items-center h-7 rounded-btn border border-border overflow-hidden" title="多策略综合选股">
+              <span className="inline-flex items-center gap-1 h-full px-2 text-[10px] text-muted bg-elevated border-r border-border">
+                <Network className="h-3 w-3" />
+                综合
+              </span>
+              {AGGREGATE_MODES.map(({ mode, label, title }) => (
+                <button
+                  key={mode}
+                  onClick={() => handleAggregateMode(mode)}
+                  disabled={assetType !== 'stock'}
+                  title={assetType === 'stock' ? title : 'ETF 暂不支持多策略批量聚合'}
+                  className={`h-full px-2 text-[10px] font-medium transition-colors
+                    ${assetType !== 'stock'
+                      ? 'text-muted/40 cursor-not-allowed'
+                      : aggregateMode === mode
+                        ? 'bg-accent/10 text-accent cursor-pointer'
+                        : 'text-muted hover:text-secondary hover:bg-elevated cursor-pointer'
+                    }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             {/* 卡片尺寸切换 */}
             <div className="flex items-center h-7 rounded-btn border border-border overflow-hidden">
               {(['hidden', 'mini', 'normal', 'large'] as const).map(sz => (
@@ -665,9 +723,9 @@ export function Screener() {
             </div>
           )}
 
-          {(showAll ? allRows.length > 0 : !!result) && (
+          {(aggregateMode !== null || !!result) && (
             <motion.div
-              key={showAll ? `all-${asOf}` : `${result!.as_of}-${result!.strategy}`}
+              key={aggregateMode ? `${aggregateMode}-${asOf}` : `${result!.as_of}-${result!.strategy}`}
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
@@ -675,18 +733,21 @@ export function Screener() {
             >
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-medium text-foreground flex items-center gap-2">
-                  {!showAll && activeStrategy && (
+                  {!aggregateMode && activeStrategy && (
                     <span className="text-secondary">{strategyIdToName[activeStrategy] ?? ''}</span>
                   )}
                   <TrendingUp className="h-4 w-4 text-accent" />
-                  {showAll ? '全部' : ''}命中 <span className="text-accent num">{displayRows.length}</span> 只
-                  {filterActive(filter) && displayRows.length !== (showAll ? allRows.length : result!.total) && (
-                    <span className="text-muted text-xs">/ {showAll ? allRows.length : result!.total}</span>
+                  {aggregateMode ? `${AGGREGATE_LABELS[aggregateMode]} ` : ''}命中 <span className="text-accent num">{displayRows.length}</span> 只
+                  {filterActive(filter) && displayRows.length !== (aggregateMode ? aggregateRows.length : result!.total) && (
+                    <span className="text-muted text-xs">/ {aggregateMode ? aggregateRows.length : result!.total}</span>
                   )}
                   <span className="text-[11px] text-muted font-normal">
                     · {visiblePool.length} 策略
-                    {!showAll && visiblePool.length > 0 && (
+                    {!aggregateMode && visiblePool.length > 0 && (
                       <> · 共 {visiblePool.reduce((sum, id) => sum + (hitCounts[id] ?? 0), 0)} 只</>
+                    )}
+                    {aggregateMode && (
+                      <> · {poolResults.length}/{visiblePool.length} 已计算</>
                     )}
                   </span>
                   {runAll.isPending && (
@@ -694,7 +755,7 @@ export function Screener() {
                   )}
                 </h2>
                 <div className="flex items-center gap-3">
-                  {(showAll ? allRows.length > 0 : !!result?.rows.length) && (
+                  {(aggregateMode ? aggregateRows.length > 0 : !!result?.rows.length) && (
                     <div className="inline-flex items-stretch h-7 rounded-btn border border-border bg-surface overflow-hidden">
                       <button
                         onClick={() => setShowFilter(v => !v)}
@@ -758,7 +819,7 @@ export function Screener() {
                   {batchMsg && (
                     <span className="text-xs text-accent animate-pulse">{batchMsg}</span>
                   )}
-                  {!showAll && result && result.elapsed_ms > 0 && (
+                  {!aggregateMode && result && result.elapsed_ms > 0 && (
                     <div className="flex items-center gap-2 text-xs text-muted">
                       <Clock className="h-3 w-3" />
                       <span className="num">{result.elapsed_ms.toFixed(1)} ms</span>
@@ -768,7 +829,7 @@ export function Screener() {
               </div>
 
               {/* 筛选面板: 只要原始结果有数据就显示 (哪怕筛完后为空, 用户才能改条件) */}
-              {showFilter && (showAll ? allRows.length > 0 : !!result?.rows.length) && (
+              {showFilter && (aggregateMode ? aggregateRows.length > 0 : !!result?.rows.length) && (
                 <FilterPanel
                   value={filter}
                   onChange={setFilter}
@@ -783,10 +844,20 @@ export function Screener() {
               {displayRows.length === 0 ? (
                 <EmptyState
                   icon={ScanSearch}
-                  title={filterActive(filter) ? '筛选后无命中' : '今日无命中'}
+                  title={filterActive(filter)
+                    ? '筛选后无命中'
+                    : aggregateMode
+                      ? `${AGGREGATE_LABELS[aggregateMode]}模式暂无命中`
+                      : '今日无命中'}
                   hint={filterActive(filter)
                     ? '当前筛选条件过严, 试试放宽或重置筛选。'
-                    : '可能数据未跑盘后管道,或策略条件过于严苛。试试 POST /api/pipeline/run。'}
+                    : aggregateMode && aggregateMode !== 'union' && visiblePool.length < 2
+                      ? '共振和交集至少需要在策略池中加入 2 个策略。'
+                      : aggregateMode === 'resonance'
+                        ? '当前没有被至少 2 个策略共同命中的股票。'
+                        : aggregateMode === 'intersection'
+                          ? '当前没有被策略池全部策略共同命中的股票。'
+                          : '可能数据未跑盘后管道,或策略条件过于严苛。试试 POST /api/pipeline/run。'}
                 />
               ) : (
                 <>
@@ -811,7 +882,7 @@ export function Screener() {
             </motion.div>
           )}
 
-          {!showAll && !result && !run.isPending && (
+          {!aggregateMode && !result && !run.isPending && (
             <div className="flex flex-col items-center justify-center py-16 gap-4">
               <div className="w-16 h-16 rounded-2xl bg-accent/5 border border-border flex items-center justify-center">
                 <ScanSearch className="h-7 w-7 text-accent/40" />

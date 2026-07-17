@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -19,9 +20,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.indicators.pipeline import run_pipeline
 from app.config import settings
-from app.services import index_sync, instrument_sync, kline_sync, preferences as _prefs
+from app.indicators.pipeline import run_pipeline
+from app.services import index_sync, instrument_sync, kline_sync
+from app.services import preferences as _prefs
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.pools import DEMO_SYMBOLS, get_pool
 from app.tickflow.repository import KlineRepository
@@ -44,7 +46,7 @@ class PipelineStageError(RuntimeError):
         super().__init__("盘后管道部分阶段失败: " + "; ".join(errors))
 
 
-def _noop(stage: str, pct: int, msg: str, **kwargs) -> None:  # noqa: ARG001
+def _noop(stage: str, pct: int, msg: str, **kwargs) -> None:
     pass
 
 
@@ -65,7 +67,7 @@ def _resolve_universe(capset: CapabilitySet) -> list[str]:
             all_a = get_pool("CN_Equity_A", refresh=True)
             if all_a:
                 return sorted(all_a)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("CN_Equity_A pool unavailable, fallback: %s", e)
 
     # Free 用户兜底: instruments parquet + watchlist + demo
@@ -77,7 +79,7 @@ def _resolve_universe(capset: CapabilitySet) -> list[str]:
         try:
             inst = pl.read_parquet(inst_path, columns=["symbol"])
             base.update(inst["symbol"].to_list())
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("instruments supplement failed: %s", e)
     return sorted(base)
 
@@ -130,7 +132,9 @@ def run_now(
     #   付费档 + 今天有数据 → 实时行情接口拉一次覆写（1请求全市场）
     #   有历史数据 → batch K-line API 补齐缺口
     #   无任何数据 → batch K-line API 拉首次 1 年
-    from datetime import date as _date, timedelta as _td, datetime as _dt
+    from datetime import date as _date
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
     latest_daily = repo.latest_daily_date()
     today = _date.today()
     today_exists = latest_daily and latest_daily >= today
@@ -208,7 +212,7 @@ def run_now(
             if lagging_symbols:
                 logger.warning("日K新鲜度: %d 只标的落后 >3 日 (停牌/退市/拉取失败; 样例: %s)",
                                len(lagging_symbols), lagging_symbols[:10])
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("laggard detection failed: %s", e)
             stage_errors.append(f"laggard detection: {e}")
 
@@ -217,7 +221,6 @@ def run_now(
     #     首次会覆盖整个日K区间内的历史除权事件; 补缺口天然只增量(起点=latest_daily≈昨天)
     #   日K实时增量/跳过(分支2/分支1) → 除权兜底拉最近 30 天, 补可能遗漏的新除权
     #     (这两类分支不拉历史日K, 除权不能用日K范围, 只能兜底最近几日)
-    written_adj = 0
     affected_symbols: list[str] = []
     adj_provider = _prefs.get_adj_factor_provider()
     if adj_provider == "same_as_daily":
@@ -240,7 +243,7 @@ def run_now(
         def _adj_chunk_progress(cur: int, tot: int) -> None:
             emit("sync_adj", 50 + int(10 * cur / tot),
                  f"除权因子批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
-        written_adj, affected_symbols = kline_sync.sync_adj_factor(
+        _written_adj, affected_symbols = kline_sync.sync_adj_factor(
             universe, repo, capset,
             start_time=adj_start, end_time=adj_end,
             on_chunk_done=_adj_chunk_progress,
@@ -256,6 +259,42 @@ def run_now(
     else:
         skipped.append("sync_adj")
         logger.info("sync_adj skipped: no ADJ_FACTOR capability")
+
+    # Step 1.8: 执行 data_enhancers 日K补缺 (§12.1) — 主同步后用增强源按 (symbol,date) 补缺
+    # 仅股票日K在此阶段补; 指数/ETF 增强由 Step 2.3 独立处理 (见 data_enhancers 范围)。
+    # 增强只 merge, 不重算 enriched (skip_enriched_recompute=True); 由下方统一 enriched 计算处理。
+    enhancement_symbols: set[str] = set()
+    enhancement_new_dates: set[_date] = set()
+    enhancer_rows = 0
+    enhancers = _prefs.get_data_enhancers()
+    enh_start = daily_range_start or (today - _td(days=400))
+    if enhancers and pull_a_share:
+        from app.services.data_enhancement import EnhancementRequest, run_enhancement
+        for enh_name in enhancers:
+            emit("enhance_daily", 47, f"增强源 {enh_name} 补缺日K…")
+            try:
+                req = EnhancementRequest(
+                    provider=enh_name,
+                    start_date=enh_start,
+                    end_date=today,
+                    asset_types=("stock",),
+                    conflict="keep_existing",
+                )
+                summary = run_enhancement(repo, req, skip_enriched_recompute=True)
+                enhancement_symbols.update(summary.affected_symbols)
+                for ds in summary.new_dates:
+                    with contextlib.suppress(ValueError):
+                        enhancement_new_dates.add(_date.fromisoformat(ds))
+                enhancer_rows += summary.inserted_rows
+                logger.info("enhance_daily(%s): +symbol=%d +date=%d rows=%d",
+                            enh_name, len(summary.affected_symbols),
+                            len(summary.new_dates), summary.inserted_rows)
+            except Exception as e:
+                logger.warning("enhance_daily(%s) 失败: %s", enh_name, e)
+                stage_errors.append(f"enhance_daily[{enh_name}]: {e}")
+        if enhancers:
+            emit("enhance_daily", 48, f"增强完成, 补缺 {enhancer_rows} 行")
+    _invalidate("daily")
 
     # Step 2: 计算 enriched
     #   判断策略:
@@ -305,7 +344,8 @@ def run_now(
         logger.info("compute_enriched: full rebuild done, %d days", new_enriched_days)
     elif forward_incremental:
         # 往后新增日期: 增量补新区块 + 受影响个股全日期重算
-        symbols_to_recompute = list(set(affected_symbols)) if affected_symbols else []
+        # symbols_to_recompute 包含除权因子变更个股 + 增强源补入个股 (§12.2)
+        symbols_to_recompute = list(set(affected_symbols) | enhancement_symbols) if (affected_symbols or enhancement_symbols) else []
         emit("compute_enriched", 65,
              f"增量计算 enriched (新日期 + {len(symbols_to_recompute)} 只个股重算)…"
              if symbols_to_recompute else "增量计算 enriched (新日期)…")
@@ -319,12 +359,13 @@ def run_now(
         new_enriched_days = len(list(enriched_dir.glob("date=*")))
         emit("compute_enriched", 88, f"enriched 完成,覆盖 {new_enriched_days} 天")
         logger.info("compute_enriched: forward incremental done, %d days", new_enriched_days)
-    elif affected_symbols:
-        # 无新日期,仅除权因子变更 → 只重算受影响个股的全部日期
-        emit("compute_enriched", 65, f"增量计算 enriched ({len(affected_symbols)} 只个股)…")
-        logger.info("compute_enriched: adj_factor incremental, %d symbols", len(affected_symbols))
-        written_enriched = run_pipeline(symbols=affected_symbols, on_batch_done=_enriched_batch_progress)
-        emit("compute_enriched", 88, f"enriched 完成,{len(affected_symbols)} 只个股")
+    elif affected_symbols or enhancement_symbols:
+        # 无新日期,仅除权因子变更或增强源补 symbol → 只重算受影响个股的全部日期
+        union_symbols = list(set(affected_symbols) | enhancement_symbols)
+        emit("compute_enriched", 65, f"增量计算 enriched ({len(union_symbols)} 只个股)…")
+        logger.info("compute_enriched: adj_factor/enhancement incremental, %d symbols", len(union_symbols))
+        written_enriched = run_pipeline(symbols=union_symbols, on_batch_done=_enriched_batch_progress)
+        emit("compute_enriched", 88, f"enriched 完成,{len(union_symbols)} 只个股")
     else:
         written_enriched = 0
         logger.info("compute_enriched: skip (no new daily, no adj_factor changes)")
@@ -410,7 +451,7 @@ def run_now(
                         )
                         etf_adj_symbols = len(affected_etfs)
                         emit("sync_index", 88, f"ETF 除权因子完成,{etf_adj_symbols} 只")
-                    except Exception as e:  # noqa: BLE001
+                    except Exception as e:
                         logger.warning("ETF adj_factor skipped: %s", e)
                         stage_errors.append(f"ETF adj_factor: {e}")
                 etf_dir = repo.store.data_dir / "kline_etf_enriched"
@@ -442,12 +483,45 @@ def run_now(
                 f"同步完成,指数 {index_count} 只/{written_index_daily} 行, ETF {etf_count} 只/{written_etf_daily} 行"
                 + (f", ETF复权 {etf_adj_symbols} 只" if etf_adj_symbols else ""),
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("sync_index/etf failed: %s", e)
             emit("sync_index", 89, f"指数/ETF同步失败:{e}")
             stage_errors.append(f"index/etf sync: {e}")
     else:
         skipped.append("sync_index")
+
+    # 主指数/ETF同步完成后再由增强源补缺；即使 TickFlow 无批量能力也允许 QuantX
+    # 使用自己的 instruments 和日K完成增强。
+    secondary_assets = tuple(
+        asset
+        for asset, enabled in (("index", pull_index), ("etf", pull_etf))
+        if enabled
+    )
+    if enhancers and secondary_assets:
+        from app.services.data_enhancement import EnhancementRequest, run_enhancement
+
+        secondary_start = today - _td(days=400)
+        for enh_name in enhancers:
+            emit("enhance_secondary", 89, f"增强源 {enh_name} 补缺指数/ETF…")
+            try:
+                summary = run_enhancement(
+                    repo,
+                    EnhancementRequest(
+                        provider=enh_name,
+                        start_date=secondary_start,
+                        end_date=today,
+                        asset_types=secondary_assets,
+                        conflict="keep_existing",
+                    ),
+                )
+                enhancer_rows += summary.inserted_rows
+                enhancement_symbols.update(summary.affected_symbols)
+                for ds in summary.new_dates:
+                    with contextlib.suppress(ValueError):
+                        enhancement_new_dates.add(_date.fromisoformat(ds))
+            except Exception as e:
+                logger.warning("enhance index/etf(%s) 失败: %s", enh_name, e)
+                stage_errors.append(f"enhance_index_etf[{enh_name}]: {e}")
 
     # Step 2.5: 分钟 K 同步(可选) — 未启用或无 capability 时静默跳过(不 emit)
     from app.services import preferences
@@ -488,6 +562,9 @@ def run_now(
     result = {
         "universe_size": len(universe),
         "daily_days": new_daily_days,
+        "enhancer_symbols": len(enhancement_symbols),
+        "enhancer_new_dates": len(enhancement_new_dates),
+        "enhancer_rows": enhancer_rows,
         "adj_factor_symbols": len(affected_symbols),
         "enriched_days": written_enriched,
         "index_count": index_count,
@@ -540,7 +617,7 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
             f"CREATE OR REPLACE VIEW {name} AS "
             f"SELECT * FROM read_parquet('{path}', union_by_name=true)"
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("refresh view %s failed: %s", name, e)
 
 
@@ -557,7 +634,7 @@ def _refresh_instruments_view(repo: KlineRepository) -> None:
             f"CREATE OR REPLACE VIEW instruments AS "
             f"SELECT * FROM read_parquet('{d}/instruments/**/*.parquet', union_by_name=true)"
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("refresh instruments view failed: %s", e)
 
 
@@ -613,8 +690,8 @@ async def _run_scheduled_review(repo) -> None:
     import json
 
     try:
-        from app.services import market_recap_reports
         from app import secrets_store as ss
+        from app.services import market_recap_reports
 
         # AI Key 未配置时跳过(避免每日报错刷日志)
         if not ss.get_ai_key():
@@ -654,7 +731,7 @@ async def _run_scheduled_review(repo) -> None:
         # 推送到飞书(可选): 运行时读取配置, 用户改设置下次触发即生效。
         # 失败静默降级, 不影响已归档的报告。
         _maybe_push_review(content, meta)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("scheduled review failed: %s", e)
         # 兜底: 异常时通知前端停止「生成中」状态, 避免页面卡在 streaming
         try:
@@ -665,7 +742,7 @@ async def _run_scheduled_review(repo) -> None:
                 qs.push_review_event(_json.dumps(
                     {"type": "error", "message": "复盘生成异常,请稍后手动重试"},
                     ensure_ascii=False))
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
 
@@ -677,6 +754,7 @@ async def _stream_review_with_retry(repo, quote_service, depth_service) -> tuple
     """
     import asyncio
     import json
+
     from app.services.market_recap import recap_market_stream
 
     max_attempts = 3  # 初次 + 2 次重试
@@ -710,7 +788,7 @@ async def _stream_review_with_retry(repo, quote_service, depth_service) -> tuple
             # 流自然结束(无 done 事件)且有内容, 视为成功
             if content_parts and not failed:
                 return "".join(content_parts), last_meta
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             # LLM 断流等异常(httpx.RemoteProtocolError)落到这里
             failed = True
             logger.warning("scheduled review stream exception (attempt %d/%d): %s",
@@ -770,7 +848,7 @@ def _maybe_push_review(content: str, meta: dict) -> None:
                 )
                 logger.info("review push(wecom) %s", "sent" if ok else "failed")
             # 未来更多渠道在此追加分支
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("review push error: %s", e)
 
 
@@ -891,7 +969,7 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
                     "能力集变化: %d → %d capabilities (档位=%s)。Key 过期/续费或端点波动, "
                     "已热更新 app.state.capabilities。", old_n, new_n, tier_label(),
                 )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("周期能力重探失败(保留现有能力集): %s", e)
 
     scheduler.add_job(

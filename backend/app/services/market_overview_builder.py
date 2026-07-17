@@ -367,9 +367,13 @@ def build_market_overview(
         as_of: 指定日期,None 则取最新有数据日。
     """
     svc = ScreenerService(repo)
+    # 仅显式选择历史日期时才限制指数日期。首页 latest 模式必须把 None 传给
+    # _index_quotes，才能优先使用 QuoteService 的实时指数缓存；旧代码先把 as_of
+    # 改成最新交易日，导致实时分支永远不可达，首页指数始终停在昨日收盘。
+    requested_as_of = as_of
     as_of = as_of or svc.latest_date()
     status = _quote_status(quote_service)
-    indices = _index_quotes(repo, quote_service, as_of)
+    indices = _index_quotes(repo, quote_service, requested_as_of)
 
     if not as_of:
         return {

@@ -24,7 +24,7 @@ def load() -> dict:
     if p.exists():
         try:
             return json.loads(p.read_text(encoding="utf-8"))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("preferences.json malformed: %s", e)
     return {}
 
@@ -58,7 +58,7 @@ def get_realtime_watchlist_symbols() -> list[str]:
     try:
         from app.services import watchlist
         rows = watchlist.list_symbols()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("load watchlist for realtime failed: %s", e)
         return []
     out: list[str] = []
@@ -71,7 +71,7 @@ def get_realtime_watchlist_symbols() -> list[str]:
     return out
 
 
-def set_realtime_watchlist_symbols(symbols: list[str]) -> list[str]:  # noqa: ARG001
+def set_realtime_watchlist_symbols(symbols: list[str]) -> list[str]:
     """兼容旧接口: Free 实时标的现在由自选页前 5 个决定。"""
     return get_realtime_watchlist_symbols()
 
@@ -105,10 +105,20 @@ _ALLOWED_DATA_PROVIDERS = {"tickflow"}
 
 
 def _allowed_data_providers() -> set[str]:
+    """可作为主数据源的 provider；纯 enhancer 不得进入旧单源选择。"""
     try:
         from app.data_providers import custom as custom_sources
-        return _ALLOWED_DATA_PROVIDERS | custom_sources.names()
-    except Exception:  # noqa: BLE001
+
+        allowed = set(_ALLOWED_DATA_PROVIDERS)
+        allowed.update(source["name"] for source in custom_sources.list_sources())
+        allowed.update(
+            plugin["name"]
+            for plugin in custom_sources.list_plugins()
+            if plugin.get("available")
+            and str(plugin.get("role", "provider")).lower() in {"provider", "both"}
+        )
+        return allowed
+    except Exception:
         return set(_ALLOWED_DATA_PROVIDERS)
 
 
@@ -137,6 +147,95 @@ def get_realtime_data_provider() -> str:
 def get_financial_provider() -> str:
     provider = str(load().get("financial_data_provider", "tickflow") or "tickflow").lower()
     return provider if provider in _allowed_data_providers() else "tickflow"
+
+
+# ===== 数据增强 (enhancers, 历史日K补缺) =====
+
+def _enhancer_candidates() -> set[str]:
+    """返回合法的 enhancer 名称集合: role in {enhancer, both} 的已注册 provider。"""
+    try:
+        from app.data_providers import custom as custom_sources
+        out = set()
+        for p in custom_sources.list_plugins():
+            role = str(p.get("role", "provider")).lower()
+            if role in {"enhancer", "both"} and p.get("available"):
+                out.add(p["name"])
+        return out
+    except Exception:
+        return set()
+
+
+def get_data_enhancers() -> list[str]:
+    """已启用的历史日K增强源列表 (默认空)。过滤掉非法/不可用的 enhancer。"""
+    raw = load().get("data_enhancers") or []
+    if not isinstance(raw, list):
+        return []
+    candidates = _enhancer_candidates()
+    out: list[str] = []
+    for name in raw:
+        n = str(name or "").strip().lower()
+        if n and n in candidates and n not in out:
+            out.append(n)
+    return out
+
+
+def set_data_enhancers(names: list[str]) -> list[str]:
+    """保存数据增强源选择 (写入前过滤非法/不可用)。"""
+    candidates = _enhancer_candidates()
+    cleaned: list[str] = []
+    for name in names or []:
+        n = str(name or "").strip().lower()
+        if n in candidates and n not in cleaned:
+            cleaned.append(n)
+    save({"data_enhancers": cleaned})
+    return cleaned
+
+
+# ===== 实时行情 provider chain (§8.1) =====
+
+def _realtime_chain_candidates() -> set[str]:
+    """合法的实时 provider: tickflow + 支持 get_realtime 且 available 的插件。"""
+    out = {"tickflow"}
+    try:
+        from app.data_providers import custom as custom_sources
+        for p in custom_sources.list_plugins():
+            if not p.get("available"):
+                continue
+            name = p["name"]
+            if name not in custom_sources.names():
+                continue  # 未注册进 _PROVIDERS
+            if hasattr(custom_sources.get_provider(name), "get_realtime"):
+                out.add(name)
+    except Exception:
+        pass
+    return out
+
+
+def get_realtime_provider_chain() -> list[str]:
+    """实时 provider chain (默认空 → 回退旧 realtime_data_provider)。"""
+    raw = load().get("realtime_provider_chain") or []
+    if not isinstance(raw, list):
+        return []
+    candidates = _realtime_chain_candidates()
+    out: list[str] = []
+    for name in raw:
+        n = str(name or "").strip().lower()
+        if n in candidates and n not in out:
+            out.append(n)
+    return out
+
+
+def set_realtime_provider_chain(names: list[str]) -> list[str]:
+    """保存实时 provider chain (tickflow 始终允许)。"""
+    candidates = _realtime_chain_candidates()
+    cleaned: list[str] = []
+    for name in names or []:
+        n = str(name or "").strip().lower()
+        if n in candidates and n not in cleaned:
+            cleaned.append(n)
+    save({"realtime_provider_chain": cleaned})
+    return cleaned
+
 
 
 # ===== 盘后管道拉取内容开关 (A股 / ETF / 指数 独立控制) =====

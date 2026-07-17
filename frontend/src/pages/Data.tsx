@@ -15,6 +15,7 @@ import {
   SlidersHorizontal,
   AlertTriangle,
   Info,
+  Sparkles,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { EndpointTestDialog } from '@/components/EndpointTestDialog'
@@ -42,6 +43,7 @@ import { ExtendHistoryPanel } from '@/components/data/ExtendHistoryPanel'
 import { EnrichedRebuildPanel } from '@/components/data/EnrichedRebuildPanel'
 import { MinuteSyncConfig } from '@/components/data/MinuteSyncConfig'
 import { PipelineScopeConfig } from '@/components/data/PipelineScopeConfig'
+import { EnhanceDialog } from '@/components/data/EnhanceDialog'
 import { PageSettingsModal, getCardVisibility, getCardOrder, type CardKey } from '@/components/data/PageSettingsModal'
 import { QuoteConfigCard } from '@/components/data/QuoteConfigCard'
 import { EnrichedSchemaModal } from '@/components/data/SchemaModal'
@@ -93,6 +95,7 @@ export function Data() {
   })
 
   const [showClearConfirm, setShowClearConfirm] = useState(false)
+  const [showEnhance, setShowEnhance] = useState(false)
   const clearData = useMutation({
     mutationFn: api.dataClear,
     onSuccess: () => {
@@ -549,6 +552,14 @@ export function Data() {
                 <Play className="h-3.5 w-3.5" />
               )}
               {isStarting ? '启动中…' : isRunning ? '同步中…' : '立即同步'}
+            </button>
+            <button
+              onClick={() => setShowEnhance(true)}
+              disabled={isStarting}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150 disabled:opacity-40"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              增强补全
             </button>
             <button
               onClick={() => setOpenSettings('pipeline-scope')}
@@ -1128,6 +1139,12 @@ export function Data() {
           </div>
         )}
       </AnimatePresence>
+
+      <EnhanceDialog
+        open={showEnhance}
+        onClose={() => setShowEnhance(false)}
+        onStarted={(jobId) => { setActiveJobId(jobId); startTime.current = Date.now() }}
+      />
     </>
   )
 }

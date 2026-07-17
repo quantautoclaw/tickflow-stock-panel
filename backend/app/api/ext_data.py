@@ -300,13 +300,14 @@ async def fetch_preset_data(request: Request, config_id: str):
     与通用 pull/run 不同: 走 ext_presets 的结构转换 (接口的 concepts/industries
     数组 → 拼接成字符串), 保证 schema 与现有数据一致。
     """
-    from app.services.ext_presets import fetch_preset
+    from app.services.ext_presets import fetch_preset, get_preset
 
+    if get_preset(config_id) is None:
+        raise HTTPException(404, f"未知的内置预设: {config_id}")
     try:
         n = await fetch_preset(config_id, _data_dir(request))
-    except ValueError as e:
-        raise HTTPException(404, str(e)) from e
     except Exception as e:
+        # 上游网络/响应结构错误不是“路由不存在”，返回 400 让前端展示真实原因。
         raise HTTPException(400, f"拉取失败: {e}") from e
 
     _refresh_views(request)

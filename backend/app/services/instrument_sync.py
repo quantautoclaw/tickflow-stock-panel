@@ -17,6 +17,48 @@ from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
 
+def merge_instrument_frames(
+    primary: pl.DataFrame,
+    enhancement: pl.DataFrame,
+) -> pl.DataFrame:
+    """维表字段级 coalesce 合并 (§10.1)。
+
+    主键为 symbol。每个字段: TickFlow(primary) 非空值优先, 为空用 enhancement;
+    enhancement 的新 symbol 追加。保留两表所有列; 输出按 symbol 去重并排序。
+    """
+    if primary.is_empty():
+        if enhancement.is_empty():
+            return pl.DataFrame()
+        return enhancement.unique(subset=["symbol"], keep="last").sort("symbol")
+    if enhancement.is_empty():
+        return primary.unique(subset=["symbol"], keep="last").sort("symbol")
+
+    primary = primary.unique(subset=["symbol"], keep="last")
+    enhancement = enhancement.unique(subset=["symbol"], keep="last")
+    p_cols = [c for c in primary.columns if c != "symbol"]
+    e_cols = [c for c in enhancement.columns if c != "symbol"]
+    result_cols = [*p_cols, *(c for c in e_cols if c not in p_cols)]
+
+    all_symbols = pl.concat(
+        [primary.select("symbol"), enhancement.select("symbol")], how="diagonal_relaxed"
+    ).unique(subset=["symbol"])
+
+    p_renamed = primary.rename({c: f"_p_{c}" for c in p_cols})
+    e_renamed = enhancement.rename({c: f"_e_{c}" for c in e_cols})
+    merged = all_symbols.join(p_renamed, on="symbol", how="left").join(e_renamed, on="symbol", how="left")
+
+    col_exprs = []
+    for c in result_cols:
+        parts = []
+        if c in p_cols:
+            parts.append(pl.col(f"_p_{c}"))
+        if c in e_cols:
+            parts.append(pl.col(f"_e_{c}"))
+        col_exprs.append(pl.coalesce(parts).alias(c))
+    merged = merged.select("symbol", *col_exprs).sort("symbol")
+    return merged
+
+
 _EXCHANGES = ["SH", "SZ", "BJ"]
 
 
@@ -63,7 +105,7 @@ def _fetch_instruments_via_provider() -> list[dict] | None:
         return None
     try:
         items = provider.get_instruments("stock") or []
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("provider %s get_instruments 失败: %s", provider_name, e)
         return None
     rows = _flatten_instruments(items)

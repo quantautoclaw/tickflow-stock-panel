@@ -65,13 +65,21 @@ def normalize_codex_command(command: str | None, *, strict: bool = True) -> str:
 
 
 def normalize_openai_base_url(url: str) -> str:
-    """Return the OpenAI-compatible base URL expected by the OpenAI SDK."""
+    """Return the provider base URL expected by the OpenAI SDK.
+
+    Root-only gateways (DeepSeek, generic proxies) commonly need ``/v1`` appended,
+    while providers such as Zhipu expose an already-versioned ``.../api/paas/v4``
+    base. Appending ``/v1`` to the latter produces the invalid ``/v4/v1`` path.
+    """
     base = (url or "").strip().rstrip("/")
     if base.endswith("/chat/completions"):
         base = base[: -len("/chat/completions")].rstrip("/")
-    if not base.endswith("/v1"):
-        base = f"{base}/v1"
-    return base
+    if not base:
+        return ""
+    # Preserve any terminal API version, not only OpenAI's /v1.
+    if re.search(r"/v\d+(?:\.\d+)?$", base, flags=re.IGNORECASE):
+        return base
+    return f"{base}/v1"
 
 
 def codex_cli_available() -> bool:

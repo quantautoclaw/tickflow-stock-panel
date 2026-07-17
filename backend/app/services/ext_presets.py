@@ -6,7 +6,9 @@
   - 「已存在则跳过」: 绝不覆盖用户已有数据, 老用户零影响
   - 拉取失败只记 warning, 不阻断启动 (保持「没数据也能跑」)
 
-种子数据来源: https://files.688798.xyz/ths/{concepts,industries}.json
+种子数据来源 (概念/行业各自独立配置):
+  - 概念: https://shy313.com/api/plugins/market_flow/exports/ths-concepts
+  - 行业: https://shy313.com/api/plugins/market_flow/exports/ths-industries
 作者更新数据只需改接口上的 JSON, 用户下次拉取自动同步, 无需发版。
 
 接入点: app.main.lifespan → ensure_builtin_presets(store.data_dir)
@@ -14,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
 from app.services.ext_data import (
@@ -26,8 +29,9 @@ from app.services.ext_data import (
 
 logger = logging.getLogger(__name__)
 
-# 种子数据源 (作者维护, 改这里即对所有用户生效)
-_THS_BASE = "https://files.688798.xyz/ths"
+# 种子数据源 (概念/行业各自独立配置, 作者维护)
+_CONCEPT_DATA_URL = "https://shy313.com/api/plugins/market_flow/exports/ths-concepts"
+_INDUSTRY_DATA_URL = "https://shy313.com/api/plugins/market_flow/exports/ths-industries"
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +59,7 @@ def _concept_preset() -> ExtConfig:
         symbol_map={"type": "mapped", "col": "股票代码"},
         code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"},
         pull=PullConfig(
-            url=f"{_THS_BASE}/concepts.json",
+            url=_CONCEPT_DATA_URL,
             method="GET",
             schedule_minutes=1440,
             enabled=False,
@@ -84,7 +88,7 @@ def _industry_preset() -> ExtConfig:
         symbol_map={"type": "mapped", "col": "股票代码"},
         code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"},
         pull=PullConfig(
-            url=f"{_THS_BASE}/industries.json",
+            url=_INDUSTRY_DATA_URL,
             method="GET",
             schedule_minutes=1440,
             enabled=False,
@@ -105,6 +109,14 @@ def _symbol_to_code(symbol: str) -> str:
     return symbol.split(".", 1)[0] if "." in symbol else symbol
 
 
+def _dimension_label(value: object) -> str:
+    """清理上游维度标签中的 null/NaN 和空白。"""
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return ""
+    text = str(value).strip()
+    return "" if text.casefold() in {"nan", "none", "null"} else text
+
+
 def _flatten_concept_rows(raw_rows: list[dict]) -> list[dict]:
     """概念: concepts 数组 → 分号拼接成「所属概念」字符串。
 
@@ -117,10 +129,11 @@ def _flatten_concept_rows(raw_rows: list[dict]) -> list[dict]:
         if not sym:
             continue
         concepts = r.get("concepts") or []
+        labels = [label for c in concepts if (label := _dimension_label(c))]
         out.append({
             "股票代码": sym,
             "股票简称": r.get("name") or "",
-            "所属概念": ";".join(str(c) for c in concepts if c),
+            "所属概念": ";".join(labels),
             "symbol": sym,
             "code": _symbol_to_code(sym),
         })
@@ -138,10 +151,11 @@ def _flatten_industry_rows(raw_rows: list[dict]) -> list[dict]:
         if not sym:
             continue
         inds = r.get("industries") or []
+        labels = [label for i in inds if (label := _dimension_label(i))]
         out.append({
             "股票代码": sym,
             "股票简称": r.get("name") or "",
-            "所属同花顺行业": "-".join(str(i) for i in inds if i),
+            "所属同花顺行业": "-".join(labels),
             "symbol": sym,
             "code": _symbol_to_code(sym),
         })
@@ -152,17 +166,36 @@ def _flatten_industry_rows(raw_rows: list[dict]) -> list[dict]:
 # 拉取执行 (复用 httpx, 不依赖 fetch_and_ingest 的 PullConfig 路径)
 # ---------------------------------------------------------------------------
 
+_ENVELOPE_KEYS = ("data", "list", "rows", "result", "results")
+
+
+def _unwrap_rows(data: object) -> list[dict]:
+    """把直接数组或常见 JSON 信封统一解包成行数组。"""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in _ENVELOPE_KEYS:
+            inner = data.get(key)
+            if isinstance(inner, list):
+                return inner
+        for value in data.values():
+            if isinstance(value, list):
+                return value
+    raise ValueError(
+        f"接口返回不是数组 (type={type(data).__name__}), "
+        f"响应预览: {str(data)[:200]}"
+    )
+
+
 async def _fetch_json(url: str) -> list[dict]:
-    """请求 JSON 接口, 返回行数组。超时 30s, 失败抛异常由调用方兜底。"""
+    """请求 JSON 行数组，并兼容常见的 ``{data: [...]}`` 信封响应。"""
     import httpx
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url)
         resp.raise_for_status()
         data = resp.json()
-    if not isinstance(data, list):
-        raise ValueError(f"接口返回不是数组: {type(data)}")
-    return data
+    return _unwrap_rows(data)
 
 
 async def _seed_one(config: ExtConfig, flatten, data_dir: Path) -> int:

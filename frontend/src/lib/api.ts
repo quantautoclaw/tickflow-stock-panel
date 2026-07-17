@@ -213,6 +213,22 @@ export interface WatchlistEntry {
   name?: string | null
 }
 
+export interface WatchlistImportCandidate {
+  code: string
+  symbol: string | null
+  name: string | null
+  matched: boolean
+  already_in_watchlist: boolean
+}
+
+export interface WatchlistImportResult {
+  provider: string
+  codes: string[]
+  candidates: WatchlistImportCandidate[]
+  matched_count: number
+  unmatched_count: number
+}
+
 export interface Quote {
   symbol: string
   price?: number
@@ -323,7 +339,7 @@ export interface OverviewMarket {
   }
   amount: { total: number; avg: number }
   boards: { board: string; count: number; up: number; down: number; up_pct: number; amount: number }[]
-  limit: { limit_up: number; broken: number; failed: number; limit_down: number; max_boards: number; seal_rate?: number; tiers: { boards: number; count: number }[]; sealed_ready?: boolean; fake_up?: number; fake_down?: number }
+  limit: { limit_up: number; broken: number; failed: number; limit_down: number; max_boards: number; seal_rate?: number; tiers: { boards: number; count: number; stocks?: { symbol: string; name?: string; amount?: number }[] }[]; sealed_ready?: boolean; fake_up?: number; fake_down?: number }
   distribution: { label: string; count: number; pct: number }[]
   trend: { above_ma5: number; above_ma20: number; above_ma60: number; above_ma5_pct: number; above_ma20_pct: number; above_ma60_pct: number; new_high: number; new_low: number }
   activity: { avg_turnover: number; high_turnover: number; high_vol_ratio: number; vol_ratio: number }
@@ -375,6 +391,9 @@ export interface StrategyDetail {
   description: string
   tags: string[]
   source: 'builtin' | 'custom' | 'ai'
+  execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy'
+  asset_types: string[]
+  timeframes: string[]
   version: string
   basic_filter: Record<string, any>
   params: StrategyParamDef[]
@@ -421,6 +440,8 @@ export interface CustomSignalCondition {
   left: string     // 字段名
   op: string       // > >= < <= == !=
   right: string    // "field:xxx" 或数字字符串
+  leftDays?: number   // 左字段取几日前 (0=当日, 默认)
+  rightDays?: number  // 右字段取几日前 (仅 right 为字段时有意义)
 }
 
 export interface CustomSignal {
@@ -431,8 +452,16 @@ export interface CustomSignal {
   enabled: boolean
 }
 
+export interface CustomSignalFieldGroup {
+  key: string
+  label: string
+  fields: { key: string; label: string }[]
+}
+
 export interface CustomSignalOptions {
   fields: { key: string; label: string }[]
+  groups?: CustomSignalFieldGroup[]
+  maxDays?: number
   operators: string[]
   kinds: { key: string; label: string }[]
 }
@@ -497,6 +526,8 @@ export interface AlertEvent {
   strategy_id?: string
   conditions?: MonitorCondition[]
   logic?: 'and' | 'or'
+  /** ext 富化字段 (行业/概念等), 键为 "{configId}__{fieldName}" */
+  [key: string]: unknown
 }
 
 /** 生成监控规则 id (时间戳 + 随机后缀), 用户无需手动填写。 */
@@ -613,6 +644,8 @@ export interface StrategyBacktestTrade {
   entry_signal_date?: string | null
   exit_signal_date?: string | null
   blocked_exit_days?: number
+  entry_signal_id?: string | null
+  exit_signal_id?: string | null
 }
 
 export interface StrategyBacktestResult {
@@ -693,6 +726,7 @@ export interface SettingsState {
   ai_configured?: boolean
   ai_model: string
   ai_codex_command?: string
+  ai_codex_reasoning_effort?: string
   ai_user_agent: string
 }
 
@@ -779,11 +813,21 @@ export interface CustomSourceConfig {
   datasets: Record<string, DatasetConfig>
 }
 
+export interface WecomBotStatus {
+  enabled: boolean
+  running: boolean
+  connected: boolean
+  bot_id_configured: boolean
+  secret_configured: boolean
+  last_error: string
+}
+
 export interface Preferences {
   realtime_quotes_enabled: boolean
   indices_nav_pinned: boolean
   minute_sync_enabled: boolean
   minute_sync_days: number
+  minute_sync_segment_days: number
   daily_data_provider?: string
   adj_factor_provider?: string
   minute_data_provider?: string
@@ -817,6 +861,9 @@ export interface Preferences {
   feishu_webhook_url?: string
   feishu_webhook_secret?: string
   wecom_webhook_url?: string
+  wecom_bot_id?: string
+  wecom_bot_secret?: string
+  wecom_bot_enabled?: boolean
   webhook_enabled_default?: boolean
   webhook_default_channels?: string[]
   sidebar_index_symbols: string[]
@@ -824,6 +871,18 @@ export interface Preferences {
   nav_hidden: string[]
   screener_auto_run: boolean
   minute_intraday_refresh: boolean
+  minute_intraday_refresh_interval: number
+  monitor_ext_fields: { concept: MonitorExtFieldItem | null; industry: MonitorExtFieldItem | null }
+}
+
+/** 监控中心 ext 字段单项配置 (行业/概念标签的来源 + 显示裁剪) */
+export interface MonitorExtFieldItem {
+  /** "configId.fieldName" */
+  field: string
+  /** 显示前N个标签, 0=不限制 */
+  maxTags?: number
+  /** 隐藏的位置 (0-based), 如 [0] 表示隐藏第一个 */
+  hiddenIndices?: number[]
 }
 export interface StrategyAlertEvent {
   source: 'strategy' | 'depth'
@@ -835,6 +894,8 @@ export interface StrategyAlertEvent {
   price?: number | null
   change_pct?: number | null
   signals?: string[]
+  /** ext 富化字段 (行业/概念等), 键为 "{configId}__{fieldName}" */
+  [key: string]: unknown
 }
 
 // ===== API surface =====
@@ -878,8 +939,8 @@ export const api = {
     ),
 
   /** 保存 AI 配置 */
-  saveAiSettings: (ai: { provider?: string; base_url?: string; api_key?: string; model?: string; codex_command?: string; user_agent?: string }) =>
-    request<{ ok: boolean; ai_provider?: string; ai_model?: string; ai_codex_command?: string; ai_configured?: boolean }>('/api/settings/ai', {
+  saveAiSettings: (ai: { provider?: string; base_url?: string; api_key?: string; model?: string; codex_command?: string; codex_reasoning_effort?: string; user_agent?: string }) =>
+    request<{ ok: boolean; ai_provider?: string; ai_model?: string; ai_codex_command?: string; ai_codex_reasoning_effort?: string; ai_configured?: boolean }>('/api/settings/ai', {
       method: 'POST',
       body: JSON.stringify(ai),
     }),
@@ -923,10 +984,14 @@ export const api = {
       '/api/settings/preferences/data-providers',
       { method: 'PUT', body: JSON.stringify(cfg) },
     ),
-  updateMinuteSync: (enabled: boolean, days: number) =>
+  updateMinuteSync: (enabled: boolean, days: number, segmentDays?: number) =>
     request<Preferences>('/api/settings/preferences/minute-sync', {
       method: 'PUT',
-      body: JSON.stringify({ minute_sync_enabled: enabled, minute_sync_days: days }),
+      body: JSON.stringify({
+        minute_sync_enabled: enabled,
+        minute_sync_days: days,
+        ...(segmentDays != null ? { minute_sync_segment_days: segmentDays } : {}),
+      }),
     }),
   updatePipelinePullTypes: (cfg: Partial<Pick<Preferences, 'pipeline_pull_a_share' | 'pipeline_pull_etf' | 'pipeline_pull_index'>>) =>
     request<{
@@ -961,6 +1026,7 @@ export const api = {
     request<{
       enabled: boolean
       running: boolean
+      paused?: boolean
       mode?: 'none' | 'watchlist' | 'full_market'
       realtime_allowed?: boolean
       interval_s: number
@@ -1006,6 +1072,8 @@ export const api = {
     sidebar_index_symbols?: string[]
     screener_auto_run?: boolean
     minute_intraday_refresh?: boolean
+    minute_intraday_refresh_interval?: number
+    monitor_ext_fields?: { concept: MonitorExtFieldItem | null; industry: MonitorExtFieldItem | null }
   }) =>
     request<{
       sse_refresh_pages: Record<string, boolean>
@@ -1014,6 +1082,8 @@ export const api = {
       sidebar_index_symbols: string[]
       screener_auto_run: boolean
       minute_intraday_refresh: boolean
+      minute_intraday_refresh_interval: number
+      monitor_ext_fields: { concept: MonitorExtFieldItem | null; industry: MonitorExtFieldItem | null }
     }>('/api/settings/preferences/realtime-monitor', {
       method: 'PUT',
       body: JSON.stringify(cfg),
@@ -1032,6 +1102,21 @@ export const api = {
     request<{ wecom_webhook_url: string }>('/api/settings/preferences/wecom-webhook', {
       method: 'PUT',
       body: JSON.stringify({ url }),
+    }),
+  updateWecomBot: (botId: string, secret: string, enabled: boolean = true) =>
+    request<{
+      wecom_bot_id: string
+      wecom_bot_secret: string
+      wecom_bot_enabled: boolean
+      wecom_bot_status: WecomBotStatus
+    }>('/api/settings/preferences/wecom-bot', {
+      method: 'PUT',
+      body: JSON.stringify({ bot_id: botId, secret, enabled }),
+    }),
+  toggleWecomBot: (enabled: boolean) =>
+    request<{ wecom_bot_enabled: boolean; wecom_bot_status: WecomBotStatus }>('/api/settings/preferences/wecom-bot-toggle', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
     }),
   updateWebhookDefault: (enabled: boolean) =>
     request<{ webhook_enabled_default: boolean }>('/api/settings/preferences/webhook-enabled-default', {
@@ -1211,17 +1296,30 @@ export const api = {
       `/api/kline/sync?symbol=${encodeURIComponent(symbol)}&days=${days}`,
       { method: 'POST' },
     ),
-  syncMinute: () =>
-    request<{ status: string; job_id: string }>('/api/kline/sync_minute', { method: 'POST' }),
+  syncMinute: (days?: number, extend?: boolean) =>
+    request<{ status: string; job_id: string }>('/api/kline/sync_minute', {
+      method: 'POST',
+      body: JSON.stringify({ ...(days ? { days } : {}), ...(extend ? { extend: true } : {}) }),
+    }),
+  syncMinuteSingle: (symbol: string) =>
+    request<{ status: string; symbol: string; rows: number }>('/api/kline/sync_minute_single', {
+      method: 'POST',
+      body: JSON.stringify({ symbol }),
+    }),
+  clearMinute: () =>
+    request<{ status: string; removed: number }>('/api/kline/clear_minute', {
+      method: 'POST',
+      body: JSON.stringify({ confirm: true }),
+    }),
   extendHistory: (value: number, unit: 'day' | 'month' | 'year') =>
     request<{ status: string; job_id: string }>('/api/kline/extend_history', {
       method: 'POST',
       body: JSON.stringify({ value, unit }),
     }),
-  extendMinuteHistory: (value: number, unit: 'day' | 'month') =>
-    request<{ status: string; job_id: string }>('/api/kline/extend_minute_history', {
+  repairDaily: (startDate: string) =>
+    request<{ status: string; job_id: string }>('/api/kline/repair_daily', {
       method: 'POST',
-      body: JSON.stringify({ value, unit }),
+      body: JSON.stringify({ start_date: startDate }),
     }),
   rebuildEnriched: () =>
     request<{ status: string; job_id: string }>('/api/kline/rebuild_enriched', {
@@ -1239,6 +1337,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ symbols, note }),
     }),
+  watchlistOcrStatus: () =>
+    request<{ provider: string; available: boolean }>('/api/watchlist/ocr-status'),
+  watchlistImportImage: (file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return request<WatchlistImportResult>('/api/watchlist/import-image', {
+      method: 'POST',
+      body: fd,
+    })
+  },
   watchlistRemove: (symbol: string) =>
     request<{ symbols: WatchlistEntry[] }>(
       `/api/watchlist/${encodeURIComponent(symbol)}`,
@@ -1259,8 +1367,12 @@ export const api = {
         : '/api/watchlist/enriched',
     ),
 
-  screenerStrategies: (assetType: 'stock' | 'etf' = 'stock') =>
-    request<{ presets: ScreenerStrategy[]; load_errors?: StrategyLoadError[] }>(`/api/screener/strategies?asset_type=${assetType}`),
+  screenerStrategies: async (assetType: 'stock' | 'etf' = 'stock') => {
+    const data = await request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
+      `/api/strategies?asset_type=${assetType}&timeframe=1d`,
+    )
+    return { presets: data.strategies, load_errors: data.load_errors }
+  },
   screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
     request<ScreenerResult>('/api/screener/run_preset', {
       method: 'POST',
@@ -1271,9 +1383,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ conditions, order_by: orderBy, limit, pool, ext_columns: extColumns || null, asset_type: assetType }),
     }),
-  screenerRunAll: (asOf?: string, strategyIds?: string[], extColumns?: string) =>
+  screenerRunAll: (asOf?: string, strategyIds?: string[], extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
     request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }> }>(
-      '/api/screener/run_all', { method: 'POST', body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, ext_columns: extColumns || null }) },
+      '/api/screener/run_all', { method: 'POST', body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, ext_columns: extColumns || null, asset_type: assetType, timeframe: '1d' }) },
     ),
   screenerCached: (extColumns?: string) =>
     request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }>; today_ever_matched: Record<string, string[]> | null; today_ever_rows: Record<string, Record<string, any>> | null; updated_at: number | null }>(
@@ -1804,8 +1916,15 @@ export const api = {
   },
 
   // ===== Strategy Engine =====
-  strategyList: () =>
-    request<{ strategies: StrategyDetail[] }>('/api/strategies'),
+  strategyList: (assetType?: 'stock' | 'etf', timeframe = '1d') => {
+    const params = new URLSearchParams()
+    if (assetType) params.set('asset_type', assetType)
+    if (timeframe) params.set('timeframe', timeframe)
+    const qs = params.toString()
+    return request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
+      `/api/strategies${qs ? `?${qs}` : ''}`,
+    )
+  },
 
   strategyGet: (id: string) =>
     request<StrategyDetail>(`/api/strategies/${id}`),
@@ -1903,12 +2022,13 @@ export const api = {
     request<{ ok: boolean; generated: number }>('/api/monitor-rules/seed', { method: 'POST' }),
 
   // ===== Alerts (触发记录) =====
-  alertsList: (params?: { days?: number; limit?: number; source?: string; type?: string }) => {
+  alertsList: (params?: { days?: number; limit?: number; source?: string; type?: string; extColumns?: string }) => {
     const qs = new URLSearchParams()
     if (params?.days) qs.set('days', String(params.days))
     if (params?.limit) qs.set('limit', String(params.limit))
     if (params?.source) qs.set('source', params.source)
     if (params?.type) qs.set('type', params.type)
+    if (params?.extColumns) qs.set('ext_columns', params.extColumns)
     const s = qs.toString()
     return request<{ alerts: AlertEvent[]; total: number }>(`/api/alerts${s ? `?${s}` : ''}`)
   },
@@ -1978,7 +2098,7 @@ export const api = {
     }
   },
 
-  strategyValidateCode: (payload: { code: string; strategy_id?: string; name?: string; description?: string; strict?: boolean }) =>
+  strategyValidateCode: (payload: { code: string; strategy_id?: string; name?: string; description?: string }) =>
     request<StrategyBuildResult>('/api/strategies/code/validate', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -1991,7 +2111,6 @@ export const api = {
     mode: 'create' | 'update'
     name?: string
     description?: string
-    strict?: boolean
   }) =>
     request<StrategyCodeSaveResult>('/api/strategies/code/save', {
       method: 'POST',

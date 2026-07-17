@@ -216,7 +216,11 @@ def _read_ext_rows(data_dir, config: ExtConfig, dimension_field: str) -> list[di
 def _dimension_values(raw: Any) -> list[str]:
     if raw is None:
         return []
-    values = [v.strip() for v in _DIMENSION_SEP.split(str(raw).strip()) if v.strip()]
+    values = [
+        v.strip()
+        for v in _DIMENSION_SEP.split(str(raw).strip())
+        if v.strip() and v.strip().casefold() not in {"nan", "none", "null"}
+    ]
     return values
 
 
@@ -367,13 +371,12 @@ def build_market_overview(
         as_of: 指定日期,None 则取最新有数据日。
     """
     svc = ScreenerService(repo)
-    # 仅显式选择历史日期时才限制指数日期。首页 latest 模式必须把 None 传给
-    # _index_quotes，才能优先使用 QuoteService 的实时指数缓存；旧代码先把 as_of
-    # 改成最新交易日，导致实时分支永远不可达，首页指数始终停在昨日收盘。
-    requested_as_of = as_of
+    # 调用方未指定日期时视为"最新"请求: 指数行情走实时缓存 (quote_service),
+    # 其余装配仍以解析出的真实日期为准。显式指定日期(历史复盘)时才回退数据库。
+    explicit_as_of = as_of is not None
     as_of = as_of or svc.latest_date()
     status = _quote_status(quote_service)
-    indices = _index_quotes(repo, quote_service, requested_as_of)
+    indices = _index_quotes(repo, quote_service, None if not explicit_as_of else as_of)
 
     if not as_of:
         return {
@@ -487,11 +490,26 @@ def build_market_overview(
         b["up_pct"] = b["up"] / count * 100
 
     tiers_map: dict[int, int] = {}
+    tiers_stocks: dict[int, list] = {}
     for r in rows:
         n = int(_finite(r.get("consecutive_limit_ups")) or 0)
         if n > 0:
             tiers_map[n] = tiers_map.get(n, 0) + 1
-    tiers = [{"boards": k, "count": v} for k, v in sorted(tiers_map.items(), key=lambda item: -item[0])]
+            sym = str(r.get("symbol") or "")
+            if sym:
+                tiers_stocks.setdefault(n, []).append({
+                    "symbol": sym,
+                    "name": r.get("name") or "",
+                    "amount": _finite(r.get("amount")) or 0.0,
+                })
+    tiers = [
+        {
+            "boards": k,
+            "count": v,
+            "stocks": sorted(tiers_stocks.get(k, []), key=lambda x: x["amount"], reverse=True)[:5],
+        }
+        for k, v in sorted(tiers_map.items(), key=lambda item: -item[0])
+    ]
 
     index_changes = [_finite(r.get("change_pct")) for r in indices]
     index_changes = [v for v in index_changes if v is not None]

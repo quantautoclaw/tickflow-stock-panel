@@ -22,7 +22,7 @@
 data/data_sources/*.yaml
 ```
 
-在桌面版中,`data/` 位于程序目录旁;在开发环境中,通常是项目根目录的 `data/`。
+Dev 模式下，默认位置是项目根目录的 `data/`；Docker 部署中，项目的 `data/` 会挂载为容器内的 `/app/data`。可通过 `DATA_DIR` 覆盖。
 
 修改 YAML 后可在「设置 -> 数据源」点击「重新加载」,或调用:
 
@@ -253,7 +253,7 @@ cp docs/examples/custom-data-source/mock_source.yaml data/data_sources/mock_sour
   change_pct = 涨跌幅 (小数, 0.0366 = 3.66%)
   change_amount = 涨跌额
   amplitude = 振幅
-  turnover_rate = 换手率
+  turnover_rate = 换手率 (小数, 0.05 = 5%; 若上游返回 5 表示 5%, 配置 transforms: turnover_rate: "value / 100")
 
 分钟K (minute):
   symbol = 股票代码

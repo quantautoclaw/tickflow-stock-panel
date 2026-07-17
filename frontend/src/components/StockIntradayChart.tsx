@@ -12,6 +12,8 @@ interface Props {
   prevClose?: number
   className?: string
   onPriceHover?: (price: number | null) => void
+  /** 自动刷新间隔(ms)。undefined/0 = 不轮询(默认)。个股对话框盘中实时刷新时传入。 */
+  refetchIntervalMs?: number
 }
 
 export function StockIntradayChart({
@@ -21,6 +23,7 @@ export function StockIntradayChart({
   prevClose,
   className,
   onPriceHover,
+  refetchIntervalMs,
 }: Props) {
   const qc = useQueryClient()
   const [minuteDismissed, setMinuteDismissed] = useState(false)
@@ -29,14 +32,14 @@ export function StockIntradayChart({
     queryKey: QK.klineMinute(symbol, date ?? ''),
     queryFn: () => api.klineMinute(symbol, date ?? undefined),
     enabled: !!symbol && !!date,
+    refetchInterval: refetchIntervalMs,
   })
 
   const fetchMinute = useMutation({
-    mutationFn: () => api.extendMinuteHistory(5, 'day'),
+    mutationFn: () => api.syncMinuteSingle(symbol),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['kline-minute', symbol] })
-      qc.invalidateQueries({ queryKey: QK.dataStatus })
-      qc.invalidateQueries({ queryKey: QK.pipelineJobs })
+      qc.invalidateQueries({ queryKey: QK.klineMinute(symbol, date ?? '') })
       setMinuteDismissed(false)
     },
   })
@@ -61,7 +64,7 @@ export function StockIntradayChart({
           {fetchMinute.isPending ? (
             <div className="flex items-center justify-center h-full gap-2 text-xs text-accent">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              <span>正在获取最近5日分钟K…</span>
+              <span>正在获取分钟K数据…</span>
             </div>
           ) : sourceIsNone ? (
             // 数据源确认无此日分钟数据 (停牌/复牌延迟等): 静态提示 + 保留重试

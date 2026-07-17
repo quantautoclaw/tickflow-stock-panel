@@ -38,7 +38,6 @@ import {
   Sparkles,
   Layers3,
   Landmark,
-  Cable,
   RadioTower,
   CheckCircle2,
   BookOpenCheck,
@@ -80,7 +79,6 @@ const nav = [
   { to: '/monitor', label: '监控中心', icon: RadioTower },
   { to: '/review',      label: '复盘',   icon: BookOpenCheck },
   { to: '/indices', label: '指数', icon: BarChart3 },
-  { to: '/trading', label: '交易', icon: Cable },
   { to: '/data',       label: '数据',   icon: Database },
 ] as const
 
@@ -338,12 +336,14 @@ export function Layout() {
 
   // SSE: 行情更新时自动刷新相关 queries + 告警通知
   useQuoteStream(realtimeEnabled, prefs?.sse_refresh_pages)
-  // 实时 SSE 连接状态 — 断开时顶部显示徽标, 提示可能漏策略告警
+  // 实时 SSE 连接状态 — 断开时底部显示提示, 提示可能漏策略告警
   const streamStatus = useQuoteStreamStatus()
 
   const toggleQuote = useToggleRealtimeQuotes()
   const isRunning = quoteStatus?.running ?? false
   const isTrading = quoteStatus?.is_trading_hours ?? false
+  // 管道/数据修正运行期间实时行情被临时暂停 — 此时禁止开启
+  const isPaused = quoteStatus?.paused ?? false
   const tier = tierRank(caps?.label ?? '')
   const isNoneTier = tier < 0
   const isWatchlistMode = tier === 0
@@ -500,7 +500,7 @@ export function Layout() {
                   <Icon className="h-4 w-4 shrink-0" />
                   <span className="flex-1">{label}</span>
                   {/* 个股分析 Beta 标识 */}
-                  {(to === '/stock-analysis' || to === '/review') && (
+                  {to === '/stock-analysis' && (
                     <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
                       Beta
                     </span>
@@ -613,12 +613,13 @@ export function Layout() {
               </div>
               <button
                 onClick={() => handleToggle(!realtimeEnabled)}
-                disabled={toggleQuote.isPending}
+                disabled={toggleQuote.isPending || isPaused}
+                title={isPaused ? '数据同步运行中，实时行情已临时暂停' : undefined}
                 className={`relative inline-flex h-4 w-7 items-center rounded-full shrink-0 transition-colors duration-200 ${
                   realtimeEnabled
                     ? 'bg-accent shadow-[0_0_6px_rgba(59,130,246,0.3)]'
                     : 'bg-elevated'
-                } ${toggleQuote.isPending ? 'opacity-50' : 'cursor-pointer'}`}
+                } ${toggleQuote.isPending || isPaused ? 'opacity-50' : 'cursor-pointer'}`}
               >
                 <span className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform duration-200 ${
                   realtimeEnabled ? 'translate-x-[14px]' : 'translate-x-0.5'
@@ -642,7 +643,9 @@ export function Layout() {
                   </button>
                 </div>
               )}
-              {isRunning && isTrading ? (
+              {isPaused ? (
+                <div className="text-warning/80">数据同步运行中，实时行情已临时暂停</div>
+              ) : isRunning && isTrading ? (
                 <div className="text-accent">行情运行中</div>
               ) : realtimeEnabled && !isTrading ? (
                 <div className="text-warning/70">非交易时段，将在交易时间自动开启</div>
@@ -690,10 +693,10 @@ export function Layout() {
           <div
             role="status"
             aria-live="polite"
-            className="fixed top-3 right-4 z-[9998] flex items-center gap-1.5 rounded-full border border-warning/30 bg-warning/10 px-2.5 py-1 text-[11px] font-medium text-warning shadow-lg backdrop-blur-md"
+            className="fixed bottom-4 left-1/2 z-[9998] flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-warning/30 bg-warning/10 px-2.5 py-1 text-[11px] font-medium text-warning shadow-lg backdrop-blur-md"
           >
             <WifiOff className="h-3 w-3 shrink-0 animate-pulse" />
-            实时连接断开 · 重连中
+            与服务连接已断开 · 正在重连
           </div>
         )}
         <Suspense

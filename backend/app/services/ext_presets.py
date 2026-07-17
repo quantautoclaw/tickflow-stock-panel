@@ -62,7 +62,7 @@ def _concept_preset() -> ExtConfig:
             url=_CONCEPT_DATA_URL,
             method="GET",
             schedule_minutes=1440,
-            enabled=False,
+            enabled=True,
         ),
     )
 
@@ -91,7 +91,7 @@ def _industry_preset() -> ExtConfig:
             url=_INDUSTRY_DATA_URL,
             method="GET",
             schedule_minutes=1440,
-            enabled=False,
+            enabled=True,
         ),
     )
 
@@ -166,6 +166,8 @@ def _flatten_industry_rows(raw_rows: list[dict]) -> list[dict]:
 # 拉取执行 (复用 httpx, 不依赖 fetch_and_ingest 的 PullConfig 路径)
 # ---------------------------------------------------------------------------
 
+# 部分网络环境 (CDN/WAF/网关) 会把数组包成 {data: [...]}/{list: [...]}/{rows: [...]} 信封。
+# 这里做一次兼容解包, 避免误判为「接口返回不是数组」。
 _ENVELOPE_KEYS = ("data", "list", "rows", "result", "results")
 
 
@@ -242,7 +244,7 @@ async def ensure_builtin_presets(data_dir: Path) -> None:
         try:
             store.upsert(config)
             logger.info("内置扩展表 %s 配置已就绪 (待用户手动获取数据)", config.id)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("内置扩展表 %s 配置写入失败 (不影响启动): %s", config.id, e)
 
 

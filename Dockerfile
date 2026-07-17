@@ -1,11 +1,15 @@
 # 两阶段构建:前端 dist 拷进后端镜像,单容器运行
 # 可选:构建网络无法直连官方源时,传入 --build-arg USE_CN_MIRROR=1 启用国内镜像
+# 可选:stock-sdk 插件默认不打包(它抓取第三方财经网站接口,存在版权与反爬风险)。
+#       如确需启用,传入 --build-arg INCLUDE_STOCKSDK=1 显式开启,使用风险自负。
 ARG USE_CN_MIRROR=1
+ARG INCLUDE_STOCKSDK=0
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 ARG PYPI_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 # 备用 PyPI 源:主源同步延迟/故障时自动兜底(阿里云与清华互为补充)
 ARG PYPI_FALLBACK=https://mirrors.aliyun.com/pypi/simple
 ARG BACKEND_EXTRAS=
+ARG CODEX_CLI_VERSION=0.144.3
 
 # === Stage 1: 前端构建 ===
 FROM node:20-alpine AS frontend-builder
@@ -24,19 +28,39 @@ RUN pnpm install --frozen-lockfile || pnpm install
 COPY frontend/ ./
 RUN pnpm build
 
-# === Stage 1b: stock-sdk 插件依赖 ===
-# stock-sdk 是 Node 型插件, Python 后端通过 subprocess 调 node bridge.mjs 抓数据。
-# 运行时镜像(python:3.11-slim)无 node, 也不应要求用户进容器手动 npm install
-# (容器删除即丢失)。这里在构建期把依赖装好, 供 Stage 2 整体 COPY 过去。
-# 必须用 bookworm 系: 与 python:3.11-slim 同 debian 代次, 避免跨代次 libc 不匹配。
+# === Stage 1b: stock-sdk 插件依赖(可选,默认跳过) ===
+# ⚠️ 合规提示: stock-sdk 通过 node bridge.mjs 抓取第三方财经网站(如东方财富)的行情接口,
+#    未经对方授权,可能违反其服务条款并涉及交易所行情版权。默认不打包(INCLUDE_STOCKSDK=0)。
+#    如确需启用,构建时传 --build-arg INCLUDE_STOCKSDK=1,即视为使用者知悉并自行承担合规责任。
+# INCLUDE_STOCKSDK=0 时,本 stage 仅产出空 node_modules 目录,保证后续 COPY 不报错。
 FROM node:20-bookworm-slim AS stocksdk-builder
 ARG USE_CN_MIRROR=1
 ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG INCLUDE_STOCKSDK=0
 WORKDIR /build
 RUN if [ "$USE_CN_MIRROR" = "1" ]; then npm config set registry "$NPM_REGISTRY"; fi
 COPY backend/app/plugins/stocksdk/package.json backend/app/plugins/stocksdk/package-lock.json ./
-# stock-sdk 是纯 JS 单包(无原生依赖), npm ci 精确还原 lockfile; 失败再退 install。
-RUN npm ci || npm install
+# INCLUDE_STOCKSDK=1 时安装依赖;=0 时仅建空目录,使最终镜像不含 stock-sdk 依赖
+RUN if [ "$INCLUDE_STOCKSDK" = "1" ]; then \
+      (npm ci || npm install); \
+    else \
+      mkdir -p /build/node_modules; \
+    fi
+
+# === Stage 1c: Codex CLI ===
+# 固定版本保证镜像可复现；只复制安装产物到运行镜像，不保留 npm。
+FROM node:20-bookworm-slim AS codex-builder
+ARG USE_CN_MIRROR=1
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+# 版本由顶层 ARG CODEX_CLI_VERSION 提供, 这里仅声明以继承, 不再重复默认值。
+ARG CODEX_CLI_VERSION
+RUN if [ "$USE_CN_MIRROR" = "1" ]; then npm config set registry "$NPM_REGISTRY"; fi \
+    && npm install --global --prefix /opt/codex "@openai/codex@${CODEX_CLI_VERSION}" \
+    && CODEX_NATIVE="$(find /opt/codex -type f -path '*/vendor/*/bin/codex' -print -quit)" \
+    && test -n "$CODEX_NATIVE" \
+    && cp "$CODEX_NATIVE" /opt/codex-native \
+    && chmod +x /opt/codex-native \
+    && /opt/codex-native --version
 
 # === Stage 2: Python 运行时 ===
 FROM python:3.11-slim AS runtime
@@ -44,16 +68,23 @@ ARG USE_CN_MIRROR=1
 ARG PYPI_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG PYPI_FALLBACK=https://mirrors.aliyun.com/pypi/simple
 ARG BACKEND_EXTRAS=
+ARG INCLUDE_STOCKSDK=0
 WORKDIR /app
 
-# Node.js 运行时: 供 stock-sdk 插件(node bridge.mjs)使用。
+# Node.js 运行时: 仅在启用 stock-sdk 插件时安装(供 node bridge.mjs 使用)。
+# Codex CLI 从官方 npm 包提取原生二进制，不依赖运行时 Node.js。
 # bookworm 自带 nodejs 18.19, 满足插件 engines>=18; --no-install-recommends 精简,
 # 自带 libnode/libc-ares 等全部动态依赖, 无需手动补库。
 # 国内构建走 apt mirror 已在 debian 镜像sources.list 配好, 无需额外换源。
+# tesseract-ocr: 自选截图导入（始终安装）; nodejs: 仅 INCLUDE_STOCKSDK=1 时安装
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+    && if [ "$INCLUDE_STOCKSDK" = "1" ]; then \
+         apt-get install -y --no-install-recommends nodejs \
+         && node --version; \
+       fi \
     && rm -rf /var/lib/apt/lists/* \
-    && node --version
+    && tesseract --version
 
 # 安装 uv(快) —— 国内镜像下三重兜底:主源 → 备用源 → 官方源,
 # 任一成功即可,避免单一镜像同步延迟/故障导致构建失败。
@@ -86,8 +117,9 @@ RUN if [ "$USE_CN_MIRROR" = "1" ]; then \
 # (<root>/backend/app/) 推导的, 容器内会错算到 /。这里用环境变量显式指定
 # 三个关键路径, 确保 static / tiers / data 都指向容器内正确位置。
 COPY backend/app ./app
-# stock-sdk 插件依赖: 从 stocksdk-builder 整体拷入, 落点与 bridge.mjs 同目录
-# (/app/app/plugins/stocksdk/node_modules), 命中 bridge.mjs loadSDK() 第一候选路径。
+# stock-sdk 插件依赖: 从 stocksdk-builder 拷入。
+# INCLUDE_STOCKSDK=0(默认) 时, stocksdk-builder 产出空目录,此处拷入空目录,
+# 即最终镜像不含 stock-sdk 依赖,插件默认不可用。
 # COPY --from 不受 .dockerignore 的 **/node_modules 规则影响。
 COPY --from=stocksdk-builder /build/node_modules ./app/plugins/stocksdk/node_modules
 COPY tiers.yaml /app/tiers.yaml
@@ -97,6 +129,10 @@ ENV STATIC_DIR=/app/static \
 
 # Frontend 静态产物
 COPY --from=frontend-builder /build/dist ./static
+
+# Codex CLI 使用官方 npm 包携带的当前平台原生二进制，无需运行时 Node.js。
+COPY --from=codex-builder /opt/codex-native /usr/local/bin/codex
+RUN codex --version
 
 ENV PYTHONPATH=/app
 # 兜底时区: 交易时段判断已在代码里显式用北京时间 (app/market_time.py),

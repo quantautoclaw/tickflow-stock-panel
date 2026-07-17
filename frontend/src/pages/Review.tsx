@@ -309,7 +309,7 @@ export function Review() {
                   value={focus}
                   onChange={(e) => setFocus(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter' && !isGenerating) generate() }}
-                  placeholder="可选:补充复盘关注点,如「明日是否加仓半导体」「量能是否持续」"
+                  placeholder="可选:补充复盘关注点,如「半导体板块持续性如何」「量能是否持续」"
                   className="flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted/60"
                 />
                 {focus && (
@@ -439,7 +439,7 @@ export function Review() {
                       {reviewPushChannels.includes('feishu') && <Check className="h-2.5 w-2.5" />}
                     </span>
                     <span className="text-[11px] text-foreground">飞书</span>
-                    <span className="text-[9px] text-muted">群机器人</span>
+                    <span className="text-[9px] text-muted">群推送 Webhook</span>
                     <span className={cn('ml-auto text-[9px]', feishuConfigured ? 'text-emerald-500' : 'text-warning')}>
                       {feishuConfigured ? '已配置' : '未配置'}
                     </span>
@@ -460,7 +460,7 @@ export function Review() {
                       {reviewPushChannels.includes('wecom') && <Check className="h-2.5 w-2.5" />}
                     </span>
                     <span className="text-[11px] text-foreground">企业微信</span>
-                    <span className="text-[9px] text-muted">群机器人</span>
+                    <span className="text-[9px] text-muted">群推送 Webhook</span>
                     <span className={cn('ml-auto text-[9px]', wecomConfigured ? 'text-emerald-500' : 'text-warning')}>
                       {wecomConfigured ? '已配置' : '未配置'}
                     </span>

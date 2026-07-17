@@ -16,6 +16,7 @@ import {
   AlertTriangle,
   Info,
   Sparkles,
+  WandSparkles,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { EndpointTestDialog } from '@/components/EndpointTestDialog'
@@ -40,6 +41,7 @@ import { SectionTitle, HistoryRow } from '@/components/data/SectionTitle'
 import { SettingsModal } from '@/components/data/SettingsModal'
 import { ScheduleEditor } from '@/components/data/ScheduleEditor'
 import { ExtendHistoryPanel } from '@/components/data/ExtendHistoryPanel'
+import { RepairDailyPanel } from '@/components/data/RepairDailyPanel'
 import { EnrichedRebuildPanel } from '@/components/data/EnrichedRebuildPanel'
 import { MinuteSyncConfig } from '@/components/data/MinuteSyncConfig'
 import { PipelineScopeConfig } from '@/components/data/PipelineScopeConfig'
@@ -134,6 +136,7 @@ export function Data() {
   const [schemaTable, setSchemaTable] = useState<string | null>(null)
   const [showEndpointTest, setShowEndpointTest] = useState(false)
   const [showCreateExt, setShowCreateExt] = useState(false)
+  const [showRepair, setShowRepair] = useState(false)
   const [editingExt, setEditingExt] = useState<ExtDataConfig | null>(null)
   const [indexBatchInput, setIndexBatchInput] = useState('100')
 
@@ -568,6 +571,14 @@ export function Data() {
               <CheckSquare className="h-3.5 w-3.5" />
               数据范围
             </button>
+            <button
+              onClick={() => setShowRepair(true)}
+              disabled={!hasData || isRunning}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150 disabled:opacity-40 disabled:pointer-events-none"
+            >
+              <WandSparkles className="h-3.5 w-3.5" />
+              修正数据
+            </button>
             <div className="w-px h-4 bg-border" />
             <div className="flex items-center gap-1.5">
               <button
@@ -651,8 +662,8 @@ export function Data() {
             running={quoteStatus.data?.running ?? false}
             isTrading={quoteStatus.data?.is_trading_hours ?? false}
             lastFetchMs={quoteStatus.data?.last_fetch_ms ?? null}
-            intervalS={quoteInterval.data?.interval ?? quoteStatus.data?.interval_s ?? 10}
-            intervalMin={quoteInterval.data?.min_interval ?? 5}
+            intervalS={quoteInterval.data?.interval ?? quoteStatus.data?.interval_s ?? 6}
+            intervalMin={quoteInterval.data?.min_interval ?? 6}
             intervalMax={quoteInterval.data?.max_interval ?? 60}
             loading={quoteStatus.isLoading}
             onToggle={(v) => toggleQuote.mutate(v)}
@@ -943,6 +954,19 @@ export function Data() {
       </AnimatePresence>
 
       <AnimatePresence>
+        {showRepair && (
+          <SettingsModal title="日 K · 修正 / 补数据" onClose={() => setShowRepair(false)}>
+            <RepairDailyPanel
+              caps={caps.data}
+              isRunning={!!activeJobId}
+              latestDate={s?.daily?.latest_date ?? null}
+              onStart={() => setShowRepair(false)}
+            />
+          </SettingsModal>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {openSettings === 'enriched' && (
           <SettingsModal title="Enriched · 计算设置" onClose={() => setOpenSettings(null)}>
             <EnrichedRebuildPanel isRunning={!!activeJobId} onStart={() => setOpenSettings(null)} />
@@ -1072,7 +1096,7 @@ export function Data() {
       <AnimatePresence>
         {openSettings === 'minute' && (
           <SettingsModal title="分钟 K · 同步设置" onClose={() => setOpenSettings(null)}>
-            <MinuteSyncConfig caps={caps.data} isRunning={!!activeJobId} onStart={() => setOpenSettings(null)} />
+            <MinuteSyncConfig caps={caps.data} onJobStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }} />
           </SettingsModal>
         )}
       </AnimatePresence>

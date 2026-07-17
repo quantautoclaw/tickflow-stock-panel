@@ -7,14 +7,26 @@ import time
 from datetime import date
 
 import polars as pl
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
 
 from app.services import watchlist
+from app.services.watchlist_ocr import import_watchlist_image
+from app.services.watchlist_ocr.provider import get_ocr_provider
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
+
+_MAX_IMPORT_IMAGE_BYTES = 12 * 1024 * 1024  # 12MB
+_IMPORT_IMAGE_TYPES = {
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+    "image/bmp",
+    "image/gif",
+}
 
 
 class AddRequest(BaseModel):
@@ -57,6 +69,52 @@ def add_batch(req: BatchAddRequest, request: Request):
     for sym in req.symbols:
         watchlist.add(sym, req.note)
     return {"symbols": _with_names(watchlist.list_symbols(), request), "added": len(req.symbols)}
+
+
+@router.get("/ocr-status")
+def ocr_status():
+    """当前 OCR 引擎是否可用（前端可据此提示安装依赖）。"""
+    provider = get_ocr_provider()
+    return {"provider": provider.name, "available": provider.available()}
+
+
+@router.post("/import-image")
+async def import_from_image(request: Request, file: UploadFile = File(...)):
+    """从自选截图识别股票代码，返回候选列表（不自动写入自选）。"""
+    import anyio
+
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    filename = (file.filename or "").lower()
+    # 严格白名单：不接受任意 image/*（如 image/svg+xml）
+    ok_type = content_type in _IMPORT_IMAGE_TYPES
+    ok_ext = filename.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"))
+    if not ok_type and not ok_ext:
+        raise HTTPException(400, "仅支持 JPG / PNG / WebP / BMP / GIF 图片")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "空文件")
+    if len(data) > _MAX_IMPORT_IMAGE_BYTES:
+        raise HTTPException(400, "图片过大（上限 12MB）")
+
+    existing = {r["symbol"] for r in watchlist.list_symbols()}
+    data_dir = request.app.state.repo.store.data_dir
+    try:
+        # OCR 为同步 CPU/子进程；丢进线程池，避免卡住事件循环（行情 SSE 等）
+        result = await anyio.to_thread.run_sync(
+            lambda: import_watchlist_image(data, data_dir, existing_symbols=existing),
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(503, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        logger.exception("watchlist import-image failed")
+        raise HTTPException(500, f"识别失败: {e}") from e
+
+    # 响应不回传整段 raw_text（可能很长）；调试时可开 query，这里默认省略
+    result.pop("raw_text", None)
+    return result
 
 
 @router.post("/{symbol}/top")
@@ -126,9 +184,6 @@ def watchlist_enriched(
     etf_symbols = [s for s in symbols if s in etf_set]
 
     df_e, cache_date = repo.get_enriched_latest()
-    # 保持原契约: 自选含股票但股票 enriched 未就绪 (预热中) → 返回"未就绪"而非部分结果
-    if stock_symbols and df_e.is_empty():
-        return {"rows": [], "as_of": None, "elapsed_ms": 0}
 
     # 以自选列表为主表 LEFT JOIN enriched, 保证自选的每一只都返回一行;
     # 不在 enriched 缓存里的标的 (新股/冷门股/新用户未同步) 指标为 null, 前端渲染为 "—".
@@ -147,12 +202,13 @@ def watchlist_enriched(
     etf_date = None
     if etf_symbols:
         df_etf_all, etf_date = repo.get_enriched_latest_asset("etf")
+        etf_watchlist_df = pl.DataFrame({"symbol": etf_symbols})
         if not df_etf_all.is_empty():
             # ETF 同样以自选为主表 LEFT JOIN, 缺失标的指标为 null
-            etf_watchlist_df = pl.DataFrame({"symbol": etf_symbols})
             df_etf = etf_watchlist_df.join(df_etf_all, on="symbol", how="left")
-            if not df_etf.is_empty():
-                df = df_etf if df.is_empty() else pl.concat([df, df_etf], how="diagonal_relaxed")
+        else:
+            df_etf = etf_watchlist_df
+        df = df_etf if df.is_empty() else pl.concat([df, df_etf], how="diagonal_relaxed")
 
     # as_of 取两类缓存中较旧者, 避免把旧的 ETF 行标成股票缓存日期
     dates = [d for d in (cache_date if stock_symbols else None, etf_date) if d is not None]

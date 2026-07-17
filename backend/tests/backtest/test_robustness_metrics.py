@@ -12,7 +12,7 @@ from datetime import date
 
 import numpy as np
 
-from app.backtest.engine import BacktestEngine, TradeRecord
+from app.backtest.engine import BacktestEngine, SimulationOptions, TradeRecord
 
 # ---------------------------------------------------------------
 # Sortino
@@ -79,6 +79,16 @@ def test_mc_drawdown_ignores_non_finite():
     """含 nan/inf 的收益应被剔除, 结果与纯净输入完全一致 (不污染分位/序列化)。"""
     dirty = np.concatenate([_MC_INPUT, [np.nan, np.inf, -np.inf]])
     assert BacktestEngine._mc_drawdown_percentiles(dirty) == BacktestEngine._mc_drawdown_percentiles(_MC_INPUT)
+
+
+def test_mc_drawdown_clips_sub_minus_100pct_pnl():
+    """防御: 单笔 pnl <= -100% 会让 (1+pnl)<=0 使 cumprod 符号翻转; clip 后分位仍有限。"""
+    pnls = np.array([0.05, -1.5, 0.08, -0.06, 0.02, -0.04])  # -1.5 = -150%, 现实不会有
+    r = BacktestEngine._mc_drawdown_percentiles(pnls)
+    assert r["mc_maxdd_p50"] is not None
+    for v in (r["mc_maxdd_p50"], r["mc_maxdd_p95"]):
+        assert v == v  # 非 nan
+        assert -1.0 <= v <= 0.0  # 回撤有界在 (-100%, 0], 未因符号翻转失真
 
 
 def test_mc_drawdown_all_positive_has_zero_drawdown():
@@ -155,6 +165,33 @@ def test_independent_candidate_stats_emits_sortino_and_mc():
         assert k in result.stats, f"independent 分支缺字段 {k}"
     # mc 应为有效数值 (n=5>=3)
     assert result.stats["mc_maxdd_p50"] is not None
+
+
+def test_lightweight_candidate_stats_do_not_call_monte_carlo(monkeypatch):
+    trades = _trades([0.10, -0.05, 0.08, -0.06, 0.03], [2, 1, 3, 2, 4])
+
+    def unexpected(_pnls):
+        raise AssertionError("Monte Carlo should not run")
+
+    monkeypatch.setattr(BacktestEngine, "_mc_drawdown_percentiles", unexpected)
+    result = BacktestEngine._calc_independent_candidate_result(
+        trades,
+        n_candidates=5,
+        execution_stats={},
+        options=SimulationOptions(
+            include_monte_carlo=False,
+            include_curves=False,
+            include_trades=False,
+            include_per_symbol_stats=False,
+            include_return_distribution=False,
+        ),
+    )
+
+    assert "mc_maxdd_p50" not in result.stats
+    assert result.equity_curve == []
+    assert result.drawdown_curve == []
+    assert result.trades == []
+    assert result.per_symbol_stats == []
 
 
 def test_calc_stats_all_wins_reports_sortino_none():

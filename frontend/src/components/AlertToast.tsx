@@ -6,6 +6,14 @@ import type { AlertEvent } from '@/lib/api'
 import { fmtPct, fmtPrice } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { playNotificationSound } from '@/lib/notificationSound'
+import { speakAlerts } from '@/lib/voiceBroadcast'
+import { usePreferences } from '@/lib/useSharedQueries'
+
+/** 通知渠道分发 — 所有副作用渠道在此汇合, 新增渠道只改这里 */
+function dispatchSideEffects(alerts: AlertEvent[]) {
+  playNotificationSound()        // 提示音 (Web Audio 合成)
+  speakAlerts(alerts)            // 语音播报 (speechSynthesis, 各自独立开关)
+}
 
 // ===== 全局状态 (模块级, 仿 Toast.tsx 模式) =====
 type Item = { id: number; alert: AlertEvent }
@@ -60,7 +68,7 @@ export function pushAlertToasts(alerts: AlertEvent[]) {
   for (const item of newItems) {
     setTimeout(() => dismiss(item.id), AUTO_DISMISS)
   }
-  playNotificationSound()                     // 整批只响一声
+  dispatchSideEffects(alerts)                  // 副作用分发: 提示音 + 语音 (整批各一次)
 }
 
 /** 手动关闭 */
@@ -86,6 +94,11 @@ const SOURCE_BADGE: Record<string, { label: string; cls: string }> = {
 export function AlertToastContainer() {
   const [items, setItems] = useState<Item[]>([])
   const navigate = useNavigate()
+  const { data: prefs } = usePreferences()
+  const extFields = prefs?.monitor_ext_fields ?? {
+    concept: { field: 'ext_gn_ths.所属概念' },
+    industry: { field: 'ext_hy_ths.所属同花顺行业' },
+  }
 
   const sub = useCallback(() => {
     _listeners.add(setItems)
@@ -181,6 +194,33 @@ export function AlertToastContainer() {
                   {ev.message && <span className="text-[11px] text-foreground/70 truncate flex-1">{ev.message}</span>}
                 </div>
               )}
+
+              {/* 行业/概念标签 (后端 SSE 推送时已富化, 字段配置来自监控中心全局设置) */}
+              {(() => {
+                const tags: { text: string; cls: string }[] = []
+                for (const [isIndustry, item] of [[true, extFields.industry], [false, extFields.concept]] as const) {
+                  if (!item?.field) continue
+                  const key = item.field.replace('.', '__')
+                  const v = (ev as Record<string, unknown>)[key]
+                  if (v == null) continue
+                  let parts = String(v).split(/[、,，;；\-]/).map(s => s.trim()).filter(Boolean)
+                  const mt = item.maxTags ?? 0
+                  if (mt > 0) parts = parts.slice(0, mt)
+                  const hi = item.hiddenIndices
+                  if (hi?.length) parts = parts.filter((_, i) => !hi.includes(i))
+                  for (const t of parts) {
+                    tags.push({ text: t, cls: isIndustry ? 'bg-sky-500/10 text-sky-400' : 'bg-orange-500/10 text-orange-400' })
+                  }
+                }
+                if (!tags.length) return null
+                return (
+                  <div className="mt-1 flex flex-wrap items-center gap-1 pl-0.5">
+                    {tags.map((t, i) => (
+                      <span key={i} className={cn('rounded px-1 py-px text-[9px] leading-tight', t.cls)}>{t.text}</span>
+                    ))}
+                  </div>
+                )
+              })()}
             </motion.div>
           )
         })}

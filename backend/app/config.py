@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     ai_api_key: str = ""
     ai_model: str = "gpt-5.5"
     ai_codex_command: str = "codex"
+    ai_codex_reasoning_effort: str = ""
     # 默认浏览器风格 UA,绕过 Cloudflare 等 CDN/WAF 的 Bot 拦截(Issue #8)。
     # 用户可在 AI 设置页按需修改。
     ai_user_agent: str = (
@@ -95,6 +96,10 @@ class Settings(BaseSettings):
     port: int = 3018
     log_level: str = "INFO"
     backtest_range_guard: bool = False
+    backtest_matrix_disk_cache_enabled: bool = True
+    backtest_matrix_cache_max_mb: int = 512
+    backtest_matrix_cache_prewarm: bool = True
+    backtest_matrix_cache_prewarm_years: int = 5
 
     # Auth — 首次启动时预置访问密码(明文, 仅用于初始化, 详见 services/auth.bootstrap_from_env)
     # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。
@@ -142,6 +147,10 @@ class Settings(BaseSettings):
             _log.warning(
                 "DATA_BACKEND=quantx 已废弃, 请在『设置 → 数据源 → 数据增强』启用 QuantX 插件"
             )
+        if self.backtest_matrix_cache_max_mb <= 0:
+            raise ValueError("backtest_matrix_cache_max_mb must be positive")
+        if self.backtest_matrix_cache_prewarm_years <= 0:
+            raise ValueError("backtest_matrix_cache_prewarm_years must be positive")
         return self
 
     @property

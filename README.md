@@ -33,16 +33,18 @@
 
 
 
-**本项目个人开源，基于 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 数据源，非 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 官方项目。仅供学习研究使用，与 TickFlow 官方无任何隶属或合作关系。** 
+**本项目个人开源，基于 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 数据源，非 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 官方项目。仅供学习研究使用，严禁商业用途。** 
 
 
-**明确不做**:不对标同花顺 / 通达信,不内置「AI 荐股 / 涨停预测」。
 
-> ⚠️ 考虑到 tickflow 数据源没有人气/资金流向等个性化数据,我将开放自有的第三方数据以供大佬们研究使用,包括但不限于当前内置的 ths 概念/ths 行业(后续更新在这里)。
 
-> 有更多想法,或提交建议/意见的道友可以邮件到 415333856@qq.com,Q 群 109338242。
+> ⚠️ 小白请绕路，本开源项目谨作为本地量化提供解决思路Demo，不作为投资软件或者看盘软件。
+>
+> **明确不做**:不对标同花顺 / 通达信,不内置「AI 荐股 / 涨停预测」。
 
-觉得有用可以点个 Star,蟹蟹 🌹
+有问题可以邮件415333856@qq.com,交流群二维码在文末。
+
+觉得有用可以点个 Star
 
 ---
 
@@ -53,7 +55,7 @@
 | 🔍 **选股引擎**   | 18 个内置策略 + 自定义信号 + AI 生成 + 代码迁移,Polars 毫秒级扫全 A 股 | [strategy.md](./docs/strategy.md) |
 | 📊 **指标流水线** | MA/EMA/MACD/RSI/KDJ/布林/量比等,一次扫表落盘 enriched Parquet          | [features.md](./docs/features.md) |
 | 🧪 **回测引擎**   | 三种模式(个股/策略组合/自由信号),T+1/手续费/滑点/止损,SSE 流式进度     | [features.md](./docs/features.md) |
-| 📡 **监控中心**   | 四类监控(策略/个股信号/价格/异动),多条件 AND/OR + 飞书推送             | [features.md](./docs/features.md) |
+| 📡 **监控中心**   | 四类监控(策略/个股信号/价格/异动),多条件 AND/OR + 语音播报 + 飞书推送  | [features.md](./docs/features.md) |
 | 📈 **个股分析**   | 9 类关键价位 + AI 四维分析(技术/基本面/财务/消息面)                    | [features.md](./docs/features.md) |
 | 🏆 **连板梯队**   | 连板层级统计 + 概念涨幅轮动 + 盘后 AI 复盘 + 炸板/翘板预警             | [features.md](./docs/features.md) |
 | 🧰 **数据扩展**   | TickFlow 多源 + 第三方接入(接口/推送/CSV/JSON)同台分析                   | [features.md](./docs/features.md) |
@@ -84,7 +86,7 @@
 - **连板梯队** Limit Up Ladder — 连板层级统计 + 概念/行业分布 + 封单监控(可切换连跌梯队)
 
 **🔔 监控与复盘**
-- **监控中心** Monitor — 策略/个股信号/价格/异动四类规则,盘中实时弹窗 + 触发记录持久化
+- **监控中心** Monitor — 策略/个股信号/价格/异动四类规则,盘中实时弹窗 + 语音播报(播报个股名称与信号) + 触发记录持久化
 - **复盘** Review (Beta) — 盘后 AI 自动生成市场复盘,可定时执行、推送飞书、下载 Markdown
 
 **🗄️ 数据与扩展**
@@ -159,6 +161,20 @@ docker compose up --build
 # 打开 http://localhost:3018
 ```
 
+Docker 镜像内置固定版本的 **Codex CLI**，Compose 会将主机 `${HOME}/.codex` 只读挂载到容器，因此主机需先完成 Codex 登录。若主机 Codex 使用 loopback local-access provider，容器会保留实际端口并自动将主机名映射为 `host.docker.internal`。需要覆盖镜像内版本时可设置构建参数：
+
+```bash
+CODEX_CLI_VERSION=0.144.3 docker compose up --build
+```
+
+> **Windows 用户注意**：纯 PowerShell / CMD 下 `HOME` 环境变量通常未设置，会导致挂载路径解析失败、容器读不到 Codex 登录态。请在 `.env` 中显式指定主机 Codex 目录：
+> ```bash
+> # PowerShell 示例(实际路径以本机为准)
+> echo "CODEX_HOME_HOST=C:\Users\你的用户名\.codex" >> .env
+> ```
+
+> Codex CLI 模式允许 TickFlow 容器读取本机 Codex 登录凭据，仅应在受信任的本机环境启用。凭据目录以只读方式挂载，不会写入镜像。
+
 镜像已内置 **stock-sdk** 数据源插件(Node 运行时 + 依赖),开箱即用。
 
 > 📖 Docker 进阶、GitHub Actions 自构建、老 CPU 兼容、访问密码设置等见 [docs/deployment.md](./docs/deployment.md)。
@@ -209,7 +225,7 @@ PORT=3018                      # 服务端口
 | 2-3    | Polars enriched 流水线 · Screener · vectorbt 回测(T+1/手续费/止损) | ✅    |
 | 4-5    | 监控引擎 · 四类监控规则 · 实时 SSE 推送 · 持久化记录               | ✅    |
 | 6      | 个股分析(专用日 K + 9 类关键价位 + AI 四维分析)                    | ✅    |
-| **v2** | Webhook 推送(QMT/掘金下单)· 板块异动 · 早晚报 · 更多扩展           | 🚧    |
+| **v2** | Webhook 推送· 板块异动 · 早晚报 · 更多扩展           | 🚧    |
 
 ---
 
@@ -230,7 +246,7 @@ fork同时请点个star哦,欢迎 Issue 和 PR。
 
 ## 💬 交流群
 
-欢迎加入交流群,讨论使用问题、功能建议或量化策略。
+欢迎加入交流群,讨论交流。
 
 <img src="./community-qr-code.jpg" alt="交流群二维码" width="240" />
 

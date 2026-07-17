@@ -53,7 +53,12 @@ def get_settings() -> dict:
     """返回当前配置概况(Key 脱敏)。"""
     from app.config import settings
     from app.services import preferences
-    from app.services.ai_provider import ai_configured, current_ai_model, current_codex_command
+    from app.services.ai_provider import (
+        ai_configured,
+        current_ai_model,
+        current_codex_command,
+        current_codex_reasoning_effort,
+    )
 
     key = secrets_store.get_tickflow_key()
     ai_provider = secrets_store.get_ai_config("ai_provider", settings.ai_provider)
@@ -76,6 +81,7 @@ def get_settings() -> dict:
         "ai_configured": ai_configured(ai_provider),
         "ai_model": current_ai_model(),
         "ai_codex_command": current_codex_command(),
+        "ai_codex_reasoning_effort": current_codex_reasoning_effort(),
         "ai_user_agent": secrets_store.get_ai_config("ai_user_agent", settings.ai_user_agent),
     }
 
@@ -235,6 +241,7 @@ class AiSettingsIn(BaseModel):
     api_key: str | None = None
     model: str = ""
     codex_command: str = ""
+    codex_reasoning_effort: str = ""
     user_agent: str = ""
 
 
@@ -247,7 +254,9 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         current_ai_model,
         current_ai_provider,
         current_codex_command,
+        current_codex_reasoning_effort,
         normalize_codex_command,
+        normalize_codex_reasoning_effort,
     )
 
     updates: dict = {}
@@ -275,8 +284,11 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
             codex_command = normalize_codex_command(req.codex_command)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        codex_reasoning_effort = normalize_codex_reasoning_effort(req.codex_reasoning_effort)
         updates["ai_codex_command"] = codex_command
+        updates["ai_codex_reasoning_effort"] = codex_reasoning_effort
         settings.ai_codex_command = codex_command
+        settings.ai_codex_reasoning_effort = codex_reasoning_effort
     # user_agent 允许清空(回到默认浏览器 UA),故无条件持久化
     updates["ai_user_agent"] = req.user_agent
     settings.ai_user_agent = req.user_agent
@@ -290,6 +302,7 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         "ai_provider": provider,
         "ai_model": current_ai_model(),
         "ai_codex_command": current_codex_command(),
+        "ai_codex_reasoning_effort": current_codex_reasoning_effort(),
         "ai_configured": ai_configured(provider),
     }
 
@@ -302,13 +315,14 @@ def clear_ai_settings() -> dict:
     """
     from app.config import settings
 
-    secrets_store.clear("ai_provider", "ai_base_url", "ai_api_key", "ai_model", "ai_codex_command")
+    secrets_store.clear("ai_provider", "ai_base_url", "ai_api_key", "ai_model", "ai_codex_command", "ai_codex_reasoning_effort")
     # 同步重置运行时内存(provider 回默认值,其余置空)
     settings.ai_provider = "openai_compat"
     settings.ai_base_url = ""
     settings.ai_api_key = ""
     settings.ai_model = ""
     settings.ai_codex_command = "codex"
+    settings.ai_codex_reasoning_effort = ""
 
     return {"ok": True}
 
@@ -324,6 +338,8 @@ def _realtime_allowed() -> bool:
 class MinuteSyncPrefs(BaseModel):
     minute_sync_enabled: bool
     minute_sync_days: int = 5
+    # 单段大小(交易日),None 表示不修改现有值。范围 [5, 30],默认 20。
+    minute_sync_segment_days: int | None = None
 
 
 class DataProvidersIn(BaseModel):
@@ -384,6 +400,7 @@ def get_preferences() -> dict:
         "indices_nav_pinned": preferences.get_indices_nav_pinned(),
         "minute_sync_enabled": preferences.get_minute_sync_enabled(),
         "minute_sync_days": preferences.get_minute_sync_days(),
+        "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
         "minute_data_provider": preferences.get_minute_data_provider(),
@@ -410,9 +427,15 @@ def get_preferences() -> dict:
         "feishu_webhook_url": preferences.get_feishu_webhook_url(),
         "feishu_webhook_secret": preferences.get_feishu_webhook_secret(),
         "wecom_webhook_url": preferences.get_wecom_webhook_url(),
+        "wecom_bot_id": preferences.get_wecom_bot_id(),
+        "wecom_bot_secret": preferences.get_wecom_bot_secret(),
+        "wecom_bot_enabled": preferences.get_wecom_bot_enabled(),
         "webhook_enabled_default": preferences.get_webhook_enabled_default(),
         "webhook_default_channels": preferences.get_webhook_default_channels(),
         "sidebar_index_symbols": preferences.get_sidebar_index_symbols(),
+        "minute_intraday_refresh": preferences.get_minute_intraday_refresh(),
+        "minute_intraday_refresh_interval": preferences.get_minute_intraday_refresh_interval(),
+        "monitor_ext_fields": preferences.get_monitor_ext_fields(),
         "nav_order": preferences.get_nav_order(),
         "nav_hidden": preferences.get_nav_hidden(),
         "screener_auto_run": preferences.get_screener_auto_run(),
@@ -638,16 +661,24 @@ def update_screener_result_columns(req: dict) -> dict:
 
 @router.put("/preferences/minute-sync")
 def update_minute_sync(req: MinuteSyncPrefs) -> dict:
-    """保存分钟 K 同步偏好。"""
+    """保存分钟 K 同步偏好。
+
+    minute_sync_segment_days 为可选:未传(None)时不覆盖现有值,便于开关/天数
+    与段大小各自独立更新。
+    """
     from app.services import preferences
     days = max(1, min(30, req.minute_sync_days))
-    preferences.save({
+    updates: dict = {
         "minute_sync_enabled": req.minute_sync_enabled,
         "minute_sync_days": days,
-    })
+    }
+    if req.minute_sync_segment_days is not None:
+        updates["minute_sync_segment_days"] = max(5, min(30, req.minute_sync_segment_days))
+    preferences.save(updates)
     return {
         "minute_sync_enabled": req.minute_sync_enabled,
         "minute_sync_days": days,
+        "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
     }
 
 
@@ -680,6 +711,9 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
         if qs:
             qs.disable()
         return {"realtime_quotes_enabled": False, "realtime_allowed": False}
+    if req.realtime_quotes_enabled and qs and qs.is_paused():
+        # 管道/数据修正运行期间禁止开启实时行情 — 防止写盘竞态
+        raise HTTPException(status_code=409, detail="数据同步运行中，实时行情已临时暂停，请稍后再开启")
     if req.realtime_quotes_enabled and qs and qs.realtime_mode() == "watchlist" and not preferences.get_realtime_watchlist_symbols():
         preferences.save({"realtime_quotes_enabled": False})
         return {"realtime_quotes_enabled": False, "realtime_allowed": True, "mode": "watchlist", "error": "watchlist_empty"}
@@ -733,6 +767,9 @@ class RealtimeMonitorConfigIn(BaseModel):
     strategy_monitor_ids: list[str] | None = None
     sidebar_index_symbols: list[str] | None = None
     screener_auto_run: bool | None = None
+    minute_intraday_refresh: bool | None = None
+    minute_intraday_refresh_interval: int | None = None
+    monitor_ext_fields: dict | None = None
 
 
 @router.put("/preferences/realtime-monitor")
@@ -846,9 +883,9 @@ class WecomWebhookPrefsIn(BaseModel):
 
 @router.put("/preferences/wecom-webhook")
 def update_wecom_webhook(req: WecomWebhookPrefsIn) -> dict:
-    """企业微信群机器人 Webhook 地址 — 与飞书并列的第二推送通道。
+    """企业微信群推送 Webhook 地址 — 与飞书并列的第二推送通道。
 
-    - url: 传入空串表示清空配置; 非空需为合法企业微信群机器人地址, 或纯 key。
+    - url: 传入空串表示清空配置; 非空需为合法企业微信群推送 Webhook 地址, 或纯 key。
     - 用户可只填 key (webhook/send?key=xxx 的 xxx 部分), 后端自动补全为完整 URL。
     """
     from app.services import preferences, webhook_adapter
@@ -857,11 +894,74 @@ def update_wecom_webhook(req: WecomWebhookPrefsIn) -> dict:
     if url and not webhook_adapter.is_valid_wecom_url(url):
         raise HTTPException(
             status_code=400,
-            detail="Webhook 地址非法, 需为企业微信群机器人地址 "
+            detail="Webhook 地址非法, 需为企业微信群推送 Webhook 地址 "
                    "(https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=... 或纯 key)",
         )
     saved_url = preferences.set_wecom_webhook_url(url)
     return {"wecom_webhook_url": saved_url}
+
+
+class WecomBotPrefsIn(BaseModel):
+    bot_id: str
+    secret: str
+    enabled: bool = True
+
+
+@router.put("/preferences/wecom-bot")
+def update_wecom_bot(req: WecomBotPrefsIn, request: Request) -> dict:
+    """企业微信智能机器人(BotID + Secret)配置 — 长连接通道。
+
+    保存凭证后立即重建连接(stop→start), 因每机器人仅允许 1 条长连接。
+    - bot_id/secret 均传空串表示清空配置并断开连接。
+    - enabled 控制是否启用长连接(凭证齐全时生效)。
+    """
+    from app.services import preferences
+
+    bot_id = (req.bot_id or "").strip()
+    secret = (req.secret or "").strip()
+    preferences.set_wecom_bot_id(bot_id)
+    preferences.set_wecom_bot_secret(secret)
+    # 凭证不齐时强制关闭(避免 enabled=True 但连不上)
+    enabled = req.enabled and bool(bot_id) and bool(secret)
+    preferences.set_wecom_bot_enabled(enabled)
+
+    # 立即应用: 重建连接
+    bot_svc = getattr(request.app.state, "wecom_bot_service", None)
+    status: dict = {}
+    if bot_svc:
+        bot_svc.apply_credential_change()
+        status = bot_svc.status()
+    return {
+        "wecom_bot_id": preferences.get_wecom_bot_id(),
+        "wecom_bot_secret": preferences.get_wecom_bot_secret(),
+        "wecom_bot_enabled": preferences.get_wecom_bot_enabled(),
+        "wecom_bot_status": status,
+    }
+
+
+class WecomBotToggleIn(BaseModel):
+    enabled: bool
+
+
+@router.put("/preferences/wecom-bot-toggle")
+def toggle_wecom_bot(req: WecomBotToggleIn, request: Request) -> dict:
+    """独立开关: 启用/禁用智能机器人长连接(不改动凭证)。
+
+    凭证不齐时强制返回未启用(无法连接)。
+    """
+    from app.services import preferences
+
+    bot_id = preferences.get_wecom_bot_id()
+    secret = preferences.get_wecom_bot_secret()
+    enabled = req.enabled and bool(bot_id) and bool(secret)
+    preferences.set_wecom_bot_enabled(enabled)
+
+    bot_svc = getattr(request.app.state, "wecom_bot_service", None)
+    status: dict = {}
+    if bot_svc:
+        bot_svc.apply_credential_change()
+        status = bot_svc.status()
+    return {"wecom_bot_enabled": enabled, "wecom_bot_status": status}
 
 
 class WebhookEnabledDefaultIn(BaseModel):
@@ -917,7 +1017,7 @@ def get_quote_interval(request: Request) -> dict:
     """获取当前行情轮询间隔和档位限制。"""
     qs = getattr(request.app.state, "quote_service", None)
     if not qs:
-        return {"interval": 10.0, "min_interval": 5.0, "max_interval": 60.0}
+        return {"interval": 6.0, "min_interval": 6.0, "max_interval": 60.0}
     return {
         "interval": qs._interval,
         "min_interval": qs.get_min_interval(),
@@ -1225,7 +1325,12 @@ def run_limit_ladder_fix(request: Request) -> dict:
     depth_svc = getattr(request.app.state, "depth_service", None)
     if not depth_svc:
         raise HTTPException(status_code=503, detail="depth 服务未初始化")
-    return depth_svc.run_once()
+    result = depth_svc.run_once()
+    # sealed 数据变了, 清看板总览缓存, 否则看板在 TTL 窗口内仍返回旧的 limit_up/fake 等
+    if result.get("ok"):
+        from app.api.overview import invalidate_overview_cache
+        invalidate_overview_cache()
+    return result
 
 
 class DepthPollingIntervalIn(BaseModel):

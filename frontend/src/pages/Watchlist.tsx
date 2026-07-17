@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock } from 'lucide-react'
+import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus } from 'lucide-react'
 import { api, type KlineRow, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
@@ -9,6 +9,7 @@ import { fmtPrice, fmtPct, fmtBigNum, priceColorClass } from '@/lib/format'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { WatchlistImportDialog } from '@/components/WatchlistImportDialog'
 import { ColumnCustomizer } from '@/components/ColumnCustomizer'
 import { StockDataTable } from '@/components/stock-table/StockDataTable'
 import { useTableSort } from '@/components/stock-table/useTableSort'
@@ -510,6 +511,7 @@ export function Watchlist() {
   // 列配置 — 从后端/localStorage 异步加载
   const [columns, setColumns] = useState<ColumnConfig[]>([...BUILTIN_COLUMNS])
   const [customizerOpen, setCustomizerOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
   const columnsLoaded = useRef(false)
 
   useEffect(() => {
@@ -625,16 +627,17 @@ export function Watchlist() {
   const klineData = dailyKVisible ? (klineBatch.data?.data ?? {}) : {}
 
   // 批量分时数据 (Pro+ 用户, 列可见时才拉)
-  // 刷新策略: 实时行情运行中自动按 15s 轮询 (不接 SSE 高频, 避免每秒拉 TickFlow 触限流);
-  // 用户也可在实时监控设置里单独开启 minute_intraday_refresh 强制刷新 (即使未开实时行情)
+  // 刷新策略: 仅当实时行情运行 且 用户在实时监控设置里开启 minute_intraday_refresh 时
+  // 按用户设定的间隔轮询 (不接 SSE 高频, 避免每秒拉 TickFlow 触限流); 与 Screener / 设置卡片描述一致。
   const { data: prefsData } = usePreferences()
   const intradayRefreshEnabled = prefsData?.minute_intraday_refresh ?? false
+  const intradayRefreshInterval = prefsData?.minute_intraday_refresh_interval ?? 6
   const minuteBatch = useQuery({
     queryKey: QK.minuteBatch(symbolsKey),
     queryFn: () => api.klineMinuteBatch(symbols),
     enabled: intradayVisible && symbols.length > 0,
     staleTime: 10_000,
-    refetchInterval: (realtimeRunning || intradayRefreshEnabled) ? 15_000 : false,
+    refetchInterval: (intradayRefreshEnabled && realtimeRunning) ? intradayRefreshInterval * 1000 : false,
   })
   const minuteData = intradayVisible ? (minuteBatch.data?.data ?? {}) : {}
 
@@ -658,7 +661,7 @@ export function Watchlist() {
       })
       // 2. 清除 list 缓存，触发后台 refetch
       qc.invalidateQueries({ queryKey: QK.watchlist })
-      qc.invalidateQueries({ queryKey: QK.watchlistEnriched() })
+      qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
       qc.invalidateQueries({ queryKey: ['watchlist-kline-batch'] })
     },
   })
@@ -682,7 +685,7 @@ export function Watchlist() {
       // 立即清空 enriched 缓存
       qc.setQueryData(['watchlist-enriched', extColumnsParam], { rows: [], as_of: null, elapsed_ms: 0 })
       qc.invalidateQueries({ queryKey: QK.watchlist })
-      qc.invalidateQueries({ queryKey: QK.watchlistEnriched() })
+      qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
       qc.invalidateQueries({ queryKey: ['watchlist-kline-batch'] })
     },
   })
@@ -754,7 +757,10 @@ export function Watchlist() {
     })
   }, [])
 
-  const clearFilters = useCallback(() => setFilters({}), [])
+  const resetAllFilters = useCallback(() => {
+    setFilters({})
+    persistBoardFilter(new Set(BOARDS))
+  }, [persistBoardFilter])
 
   // 可筛选的内置列
   const filterableBuiltinCols = useMemo(
@@ -808,6 +814,8 @@ export function Watchlist() {
   }, [rows, filters, columns, boardFilter])
 
   const activeFilterCount = Object.values(filters).filter(v => v.min || v.max || v.text).length
+  const hasBoardFilter = boardFilter.size > 0 && boardFilter.size < BOARDS.length
+  const hasActiveFilters = activeFilterCount > 0 || hasBoardFilter
 
   // 排序（复用共享三态排序 hook）
   const { sort, toggle: handleSortToggle, sortRows } = useTableSort()
@@ -872,11 +880,11 @@ export function Watchlist() {
         }
         right={
           <div className="flex items-center gap-2">
-            {/* 筛选 / 搜索 */}
+            {/* 筛选 / 重置 / 搜索 */}
             <button
               onClick={() => setFilterOpen(v => !v)}
               className={`inline-flex items-center justify-center h-8 w-8 rounded-btn transition-colors duration-150 ease-smooth ${
-                filterOpen || activeFilterCount > 0
+                filterOpen || hasActiveFilters
                   ? 'bg-accent/15 text-accent hover:bg-accent/25'
                   : 'bg-elevated text-secondary hover:bg-elevated/80'
               }`}
@@ -884,11 +892,28 @@ export function Watchlist() {
             >
               <Filter className="h-4 w-4" />
             </button>
+            {hasActiveFilters && (
+              <button
+                onClick={resetAllFilters}
+                className="inline-flex items-center justify-center h-8 w-8 rounded-btn bg-elevated text-secondary hover:bg-danger/10 hover:text-danger transition-colors duration-150 ease-smooth"
+                title="重置全部筛选"
+                aria-label="重置全部筛选"
+              >
+                <RotateCcw className="h-4 w-4" />
+              </button>
+            )}
             <StockSearchBox
               onPreview={(sym, name) => { setPreviewSymbol(sym); setPreviewName(name) }}
               existingSymbols={allSymbols as string[]}
               onAdd={(sym) => addMutation.mutate(sym)}
             />
+            <button
+              onClick={() => setImportOpen(true)}
+              className="inline-flex items-center justify-center h-8 w-8 rounded-btn bg-elevated hover:bg-elevated/80 text-secondary hover:text-foreground transition-colors duration-150 ease-smooth"
+              title="从截图导入自选"
+            >
+              <ImagePlus className="h-4 w-4" />
+            </button>
             <div className="w-px h-5 bg-border" />
             {/* 视图 */}
             <button
@@ -995,9 +1020,9 @@ export function Watchlist() {
               </div>
             )
           })}
-          {activeFilterCount > 0 && (
-            <button onClick={clearFilters} className="mt-1 text-[10px] text-danger hover:text-danger/80 transition-colors">
-              清除全部筛选
+          {hasActiveFilters && (
+            <button onClick={resetAllFilters} className="mt-1 text-[10px] text-danger hover:text-danger/80 transition-colors">
+              重置全部筛选
             </button>
           )}
         </div>
@@ -1014,7 +1039,7 @@ export function Watchlist() {
             <EmptyState
               icon={Star}
               title="自选股为空"
-              hint="点击右上角搜索按钮查找并预览标的，进入个股详情后可添加到自选。"
+              hint="点击右上角搜索添加标的，或点击图片图标从券商自选截图批量导入。"
             />
           ) : viewMode === 'table' ? (
             <StockDataTable
@@ -1048,6 +1073,7 @@ export function Watchlist() {
                   )
                 }
                 if (col.source.type === 'builtin' && col.source.key === 'intraday') {
+                  const intradayAutoRefresh = intradayRefreshEnabled && realtimeRunning
                   return (
                     <span className="inline-flex items-center justify-center gap-1.5">
                       <span>{col.label}</span>
@@ -1064,6 +1090,23 @@ export function Watchlist() {
                       >
                         {intradayChartVisible ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
                       </button>
+                      {/* 分时图显示 且 未开自动轮询时, 提供手动刷新按钮 */}
+                      {intradayChartVisible && !intradayAutoRefresh && (
+                        <button
+                          type="button"
+                          onClick={(event) => { event.stopPropagation(); minuteBatch.refetch() }}
+                          disabled={minuteBatch.isFetching}
+                          className="inline-flex items-center justify-center w-5 h-5 rounded text-muted hover:text-accent hover:bg-accent/10 transition-colors disabled:opacity-40"
+                          title="刷新分时数据"
+                          aria-label="刷新分时数据"
+                        >
+                          <RefreshCw className={`h-3.5 w-3.5 ${minuteBatch.isFetching ? 'animate-spin' : ''}`} />
+                        </button>
+                      )}
+                      {/* 自动轮询中: 显示旋转图标提示正在实时刷新 */}
+                      {intradayChartVisible && intradayAutoRefresh && (
+                        <RefreshCw className="h-3 w-3 text-accent/60 animate-spin" aria-label="实时刷新中" />
+                      )}
                     </span>
                   )
                 }
@@ -1215,7 +1258,7 @@ export function Watchlist() {
             />
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-3">
-              {rows.map((r: any) => (
+              {sortedRows.map((r: any) => (
                 <StockCard
                   key={r.symbol}
                   r={r}
@@ -1293,6 +1336,8 @@ export function Watchlist() {
         name={previewName}
         onClose={closePreview}
       />
+
+      <WatchlistImportDialog open={importOpen} onClose={() => setImportOpen(false)} />
     </div>
   )
 }

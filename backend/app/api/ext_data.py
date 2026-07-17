@@ -314,6 +314,34 @@ async def fetch_preset_data(request: Request, config_id: str):
     return {"status": "ok", "rows": n}
 
 
+@router.post("/quantx/{config_id}/sync")
+def sync_quantx_ext_table_route(request: Request, config_id: str, days: int = Query(7, ge=1, le=365)):
+    """手动触发 QuantX 扩展表 (资金流/涨停明细/龙虎榜) 同步, 拉取最近 N 个自然日。
+
+    注意: 必须在 /{config_id}/... 动态路由之前声明 (与 /presets/{config_id}/fetch 同理)。
+    与 /presets/{config_id}/fetch 不同: 数据来自本地 QuantX DataStore, 不是网络拉取,
+    因此这里是同步函数, 不需要 async client。
+    """
+    from app.services.quantx_ext_tables import is_quantx_ext_preset, sync_quantx_ext_table
+
+    if not is_quantx_ext_preset(config_id):
+        raise HTTPException(404, f"未知的 QuantX 扩展表预设: {config_id}")
+
+    from datetime import timedelta
+
+    end = date.today()
+    start = end - timedelta(days=days)
+    try:
+        n, last_date = sync_quantx_ext_table(
+            config_id, _data_dir(request), start.isoformat(), end.isoformat()
+        )
+    except Exception as e:
+        raise HTTPException(400, f"QuantX 扩展表同步失败: {e}") from e
+
+    _refresh_views(request)
+    return {"status": "ok", "rows": n, "last_date": last_date}
+
+
 @router.post("")
 def create_config(request: Request, body: CreateExtReq):
     """创建扩展数据配置。"""

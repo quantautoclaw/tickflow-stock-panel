@@ -322,6 +322,28 @@ def run_now(
             emit("enhance_daily", 48, f"增强完成, 补缺 {enhancer_rows} 行")
     _invalidate("daily")
 
+    # Step 1.9: QuantX 个性化扩展表 (资金流/涨停明细/龙虎榜) 增量同步。
+    # 复用同一个 data_enhancers 开关 (启用 quantx 增强源即视为用户认可该数据源)。
+    # 只同步近几日 (增量刷新最新分区); 长历史回补走扩展数据页手动同步按钮。
+    if "quantx" in enhancers and pull_a_share:
+        from app.services.quantx_ext_tables import (
+            LIMIT_LIST_ID,
+            MONEYFLOW_ID,
+            TOP_LIST_ID,
+            sync_quantx_ext_table,
+        )
+        qx_ext_start = (today - _td(days=5)).isoformat()
+        qx_ext_end = today.isoformat()
+        for qx_config_id in (MONEYFLOW_ID, LIMIT_LIST_ID, TOP_LIST_ID):
+            try:
+                n, last_date = sync_quantx_ext_table(
+                    qx_config_id, repo.store.data_dir, qx_ext_start, qx_ext_end
+                )
+                logger.info("quantx_ext(%s): %d rows, last=%s", qx_config_id, n, last_date)
+            except Exception as e:
+                logger.warning("quantx_ext(%s) 同步失败: %s", qx_config_id, e)
+                stage_errors.append(f"quantx_ext[{qx_config_id}]: {e}")
+
     # Step 2: 计算 enriched
     #   判断策略:
     #     - 首次 (enriched 目录不存在) → 全量

@@ -127,6 +127,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("内置扩展表初始化失败 (不影响启动): %s", e)
 
+    # QuantX 扩展表 (资金流/涨停明细/龙虎榜): 同样只注册 config, 不在启动时读 QuantX 数据。
+    try:
+        from app.services.quantx_ext_tables import ensure_quantx_ext_presets
+        ensure_quantx_ext_presets(store.data_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("QuantX 扩展表初始化失败 (不影响启动): %s", e)
+
     # 扩展数据定时拉取: 在预设配置就绪后启动, 自动调度 enabled 的预设。
     from app.services.ext_pull import pull_scheduler
     pull_scheduler.start(store.data_dir)

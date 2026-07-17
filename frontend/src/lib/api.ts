@@ -351,6 +351,8 @@ export interface OverviewMarket {
   active_leaders: MarketSnapshotRow[]
   concept_rank: { leading: OverviewDimensionRankItem[]; lagging: OverviewDimensionRankItem[] }
   industry_rank: { leading: OverviewDimensionRankItem[]; lagging: OverviewDimensionRankItem[] }
+  /** 北向资金 (来源: QuantX 数据增强插件); 插件未启用/数据缺失时 available=false */
+  north_flow?: { available: boolean; date?: string; north_money_yi?: number }
 }
 
 // ===== 概念涨幅轮动矩阵 =====
@@ -1617,6 +1619,13 @@ export const api = {
   extDataPresetFetch: (id: string) =>
     request<{ status: string; rows: number }>(
       `/api/ext-data/presets/${id}/fetch`,
+      { method: 'POST' },
+    ),
+
+  // QuantX 扩展表 (资金流/涨停明细/龙虎榜): 从本地 DataStore 同步, 非网络拉取
+  extDataQuantxSync: (id: string, days = 7) =>
+    request<{ status: string; rows: number; last_date: string }>(
+      `/api/ext-data/quantx/${id}/sync?days=${days}`,
       { method: 'POST' },
     ),
 

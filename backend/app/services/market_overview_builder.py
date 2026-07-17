@@ -11,6 +11,7 @@ quote_service,depth_service}` 的依赖改为显式参数。
 """
 from __future__ import annotations
 
+import logging
 import math
 import re
 from datetime import date
@@ -20,6 +21,8 @@ import polars as pl
 
 from app.services.ext_data import ExtConfig, ExtConfigStore
 from app.services.screener import ScreenerService
+
+logger = logging.getLogger(__name__)
 
 # ================================================================
 # 常量(与 overview.py 保持同步;复盘复盘仅 A 股核心指数)
@@ -83,6 +86,30 @@ def _score(value: float, low: float, high: float) -> int:
 # ================================================================
 # 指数行情(实时 quote_service 优先,回退 kline_index_daily SQL)
 # ================================================================
+
+def _north_flow(as_of: date) -> dict:
+    """北向资金 (QuantX std_hsgt, 大盘聚合指标, 无 symbol 维度, 不走 ext_data)。
+
+    QuantX 未启用/不可用/数据缺失时返回 available=False, 前端隐藏该区块, 不报错。
+    north_money 原始单位为「亿元」, 与新闻惯例口径一致, 不做单位换算。
+    """
+    try:
+        from app.plugins.quantx import bridge
+        ok, _reason = bridge.availability()
+        if not ok:
+            return {"available": False}
+        df = bridge.get_store().get_hsgt(end_date=str(as_of))
+        if df.is_empty() or "north_money" not in df.columns:
+            return {"available": False}
+        row = df.sort("date").tail(1).row(0, named=True)
+        north_money = _finite(row.get("north_money"))
+        if north_money is None:
+            return {"available": False}
+        return {"available": True, "date": str(row.get("date") or as_of), "north_money_yi": north_money}
+    except Exception as e:  # noqa: BLE001
+        logger.debug("north_flow (quantx hsgt) 获取失败, 前端隐藏: %s", e)
+        return {"available": False}
+
 
 def _quote_status(quote_service) -> dict:
     qs = quote_service
@@ -398,6 +425,7 @@ def build_market_overview(
             "active_leaders": [],
             "concept_rank": {"leading": [], "lagging": []},
             "industry_rank": {"leading": [], "lagging": []},
+            "north_flow": {"available": False},
         }
 
     df = svc._load_enriched_for_date(as_of)
@@ -595,4 +623,5 @@ def build_market_overview(
         "active_leaders": _top_rows(rows, "turnover_rate", True),
         "concept_rank": concept_rank,
         "industry_rank": industry_rank,
+        "north_flow": _north_flow(as_of),
     })
